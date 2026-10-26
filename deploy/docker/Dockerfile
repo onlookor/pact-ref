@@ -1,4 +1,4 @@
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.99-bookworm AS builder
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p pact-refd
