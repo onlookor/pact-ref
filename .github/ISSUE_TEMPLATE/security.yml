@@ -1,0 +1,18 @@
+name: Security report
+description: 不要在这里披露漏洞；请走私有报告
+title: "[security] "
+labels: ["security"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请不要在公开 issue 中披露漏洞细节、凭据或可利用载荷。
+        请使用 GitHub 的 Private vulnerability reporting（Security 标签页）。
+        本模板只用于“安全流程/文档”类问题。
+  - type: textarea
+    id: process
+    attributes:
+      label: 流程/文档问题
+      description: 不包含漏洞细节
+    validations:
+      required: true

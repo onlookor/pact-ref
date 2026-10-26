@@ -1,0 +1,38 @@
+apiVersion: pact.ref/v1
+kind: RefBindings
+metadata:
+  domain: se_lifecycle
+  declarationDigest: sha256:...
+spec:
+  defaults:
+    ref:
+      required: true
+      visibility: read-gate
+      pinning: required-at-archive
+      schemes: [urn, https, git, oci]
+      onUnknownScheme: reject
+  types:
+    requirement:
+      ref:
+        schemes: [urn, https]
+        contract: se/requirement@1
+    design:
+      ref:
+        schemes: [https, git]
+        contract: se/design-review@2
+    implementation:
+      ref:
+        schemes: [git, oci]
+        contract: se/implementation@1
+    test_report:
+      ref:
+        schemes: [https]
+        contract: se/test-report@1
+    deployment:
+      ref:
+        schemes: [oci]
+        contract: se/deployment@1
+    review_meeting:
+      ref:
+        required: false
+        value: none

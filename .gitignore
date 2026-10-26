@@ -1,0 +1,19 @@
+/target
+**/target
+
+# 本地运行数据与凭据
+/data
+.env
+*.pem
+*.key
+*.crt
+
+# IDE / 工具目录
+.idea/
+.vscode/
+.trae/
+
+# 构建与分发产物
+/dist/
+*.tar.gz
+*.sha256

@@ -1,0 +1,14 @@
+[package]
+name = "pact-refd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引治理平面服务二进制"
+
+[dependencies]
+pact-ref-core.workspace = true
+pact-ref-resolver.workspace = true
+pact-ref-invoker.workspace = true
+pact-ref-registry.workspace = true
+pact-ref-auth.workspace = true
+pact-ref-audit.workspace = true

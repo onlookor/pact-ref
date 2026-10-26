@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-adapter-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "File scheme adapter skeleton"
+
+[dependencies]
+pact-ref-core.workspace = true

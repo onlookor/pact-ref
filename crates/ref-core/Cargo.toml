@@ -1,0 +1,8 @@
+[package]
+name = "pact-ref-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引治理的纯类型与策略接口：零 IO、零网络"
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引可选发现与 ContractCard 索引"
+
+[dependencies]
+pact-ref-core.workspace = true

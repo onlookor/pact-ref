@@ -1,0 +1,39 @@
+apiVersion: pact.ref/v1
+kind: ContractCard
+metadata:
+  id: build/mcp-build
+  version: "3"
+  owner: build-platform
+  status: active
+spec:
+  capability:
+    kind: mcp-tool
+    server:
+      id: mcp://build.example.com/build-server
+      trustAnchor: https://build.example.com/.well-known/mcp
+      protocol: "2025-06-18"
+    tool:
+      name: build.run
+      version: "3"
+      inputSchemaDigest: sha256:...
+      outputSchemaDigest: sha256:...
+    sideEffect: mutating
+    idempotency:
+      key: "token_id + request_id"
+      semantics: at-most-once
+    result:
+      materialization: required
+      returns: urn:pact:artifact:build-result
+      recordDigest: true
+    auth:
+      audience: pact-ref
+      scopes: [build:run]
+      credentialSource: broker
+    timeoutMs: 600000
+    failure:
+      timeout: retryable-with-idempotency-key
+      buildFailed: permanent
+      unauthorized: permanent
+  reference:
+    schemes: [mcp]
+    uriPattern: "mcp://build.example.com/build-server/build.run@3#schema=sha256:..."

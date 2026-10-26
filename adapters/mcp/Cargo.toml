@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-adapter-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP capability adapter skeleton"
+
+[dependencies]
+pact-ref-core.workspace = true

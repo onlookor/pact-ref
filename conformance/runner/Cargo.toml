@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-conformance-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引一致性测试 runner 骨架"
+
+[dependencies]
+pact-ref-core.workspace = true

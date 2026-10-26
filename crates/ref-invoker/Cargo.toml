@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-invoker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引 invoke SPI 与动态能力注册表"
+
+[dependencies]
+pact-ref-core.workspace = true

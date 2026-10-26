@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-adapter-oci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OCI scheme adapter skeleton"
+
+[dependencies]
+pact-ref-core.workspace = true

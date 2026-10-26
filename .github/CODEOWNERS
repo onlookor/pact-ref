@@ -1,0 +1,15 @@
+# 替换为实际组织/团队；引导阶段用占位。
+* @pact-project/pact-ref-maintainers
+
+/crates/ref-core/        @pact-project/pact-ref-maintainers @pact-project/pact-core
+/crates/ref-resolver/    @pact-project/pact-ref-maintainers
+/crates/ref-invoker/     @pact-project/pact-ref-maintainers @pact-project/pact-mcp
+/crates/ref-registry/    @pact-project/pact-ref-maintainers
+/crates/ref-auth/        @pact-project/pact-security
+/crates/ref-audit/       @pact-project/pact-security
+/services/refd/          @pact-project/pact-ref-maintainers
+/adapters/mcp/           @pact-project/pact-mcp
+/adapters/file/          @pact-project/pact-security
+/adapters/http/          @pact-project/pact-security
+/.github/workflows/      @pact-project/pact-ref-maintainers @pact-project/pact-security
+/SECURITY.md             @pact-project/pact-security

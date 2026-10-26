@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pact-project/pact-ref/security/advisories/new
+    about: 私下报告安全漏洞；不要开公开 issue
+  - name: PACT 物引治理专题
+    url: https://github.com/pact-project/pact/blob/main/docs/thingref-governance.md
+    about: 设计背景与边界

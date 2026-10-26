@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ref-core",
+    "crates/ref-resolver",
+    "crates/ref-invoker",
+    "crates/ref-registry",
+    "crates/ref-auth",
+    "crates/ref-audit",
+    "crates/ref-client",
+    "services/refd",
+    "adapters/http",
+    "adapters/git",
+    "adapters/oci",
+    "adapters/file",
+    "adapters/mcp",
+    "conformance/runner",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+pact-ref-core = { path = "crates/ref-core" }
+pact-ref-resolver = { path = "crates/ref-resolver" }
+pact-ref-invoker = { path = "crates/ref-invoker" }
+pact-ref-registry = { path = "crates/ref-registry" }
+pact-ref-auth = { path = "crates/ref-auth" }
+pact-ref-audit = { path = "crates/ref-audit" }
+pact-ref-client = { path = "crates/ref-client" }
+pact-ref-adapter-http = { path = "adapters/http" }
+pact-ref-adapter-git = { path = "adapters/git" }
+pact-ref-adapter-oci = { path = "adapters/oci" }
+pact-ref-adapter-file = { path = "adapters/file" }
+pact-ref-adapter-mcp = { path = "adapters/mcp" }
+
+[profile.release]
+lto = true
+strip = true

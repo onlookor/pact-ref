@@ -1,0 +1,35 @@
+# .editorconfig - 项目级编辑器格式契约
+root = true
+
+# 全局默认值（所有文件）
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Markdown 特殊处理（保留行尾空格可能表示换行）
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefile 必须用 Tab
+[Makefile]
+indent_style = tab
+
+# Shell 脚本常用 2 空格
+[*.{sh,bash,zsh}]
+indent_size = 2
+
+# JSON/YAML 常用 2 空格
+[*.{json,yml,yaml,toml}]
+indent_size = 2
+
+# C/C++ 头文件和源文件
+[*.{c,h,cpp,hpp,cc}]
+indent_size = 4
+
+# Go 语言强制 Tab
+[*.go]
+indent_style = tab

@@ -1,0 +1,35 @@
+name: Bug report
+description: 报告可复现的缺陷
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "请勿在此报告安全漏洞；安全漏洞请走 Private vulnerability reporting。"
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际行为与期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 命令、输入票面、ContractCard、RefBindings
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本/提交
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 请先脱敏，不要粘贴凭据或正文
+    validations:
+      required: false

@@ -1,0 +1,40 @@
+name: ContractCard proposal
+description: 提议新的契约卡或字段
+title: "[contract] "
+labels: ["area/spec", "contract-card"]
+body:
+  - type: input
+    id: contract
+    attributes:
+      label: 契约 ID / 版本
+      placeholder: "se/design-review@3"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 下游要回答的问题
+      description: 这个字段/契约解决哪个交接问题
+    validations:
+      required: true
+  - type: textarea
+    id: lifecycle
+    attributes:
+      label: 定版与保留
+      description: digest/version、retention、tombstone
+    validations:
+      required: true
+  - type: textarea
+    id: auth
+    attributes:
+      label: 信任与权限
+      description: audience、scopes、credentialSource、撤销
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: 失败语义
+      description: 可重试/永久、物化策略、witness token
+    validations:
+      required: true

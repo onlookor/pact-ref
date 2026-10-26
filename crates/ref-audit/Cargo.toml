@@ -1,0 +1,9 @@
+[package]
+name = "pact-ref-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PACT 物引访问/调用审计边车"
+
+[dependencies]
+pact-ref-core.workspace = true

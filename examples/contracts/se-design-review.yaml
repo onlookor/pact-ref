@@ -1,0 +1,54 @@
+apiVersion: pact.ref/v1
+kind: ContractCard
+metadata:
+  id: se/design-review
+  version: "2"
+  owner: architecture-guild
+  status: active
+  labels: [design, review, internal]
+spec:
+  artifact:
+    kind: document
+    mediaType: text/markdown; charset=utf-8
+    schema: https://schemas.example.com/se/design-review/v2.json
+    schemaDigest: sha256:6f1c...
+    digestPolicy: required-at-archive
+  reference:
+    schemes: [https, git]
+    uriPattern: "https://artifacts.example.com/design/{id}#sha256=<hex>"
+    pinning:
+      requiredForArchive: true
+      accepted: [sha256, git-commit]
+    mutableAllowed: false
+    maxLength: 2048
+  parties:
+    producer: architect
+    custodian: artifacts-team
+    consumers: [developer, tester, release-manager]
+    consumerScope: "domain:se_lifecycle"
+  resolution:
+    mode: fetch
+    endpoint: https://artifacts.example.com
+    auth:
+      scheme: oauth2
+      audience: pact-ref
+      scopes: [artifact:read]
+      credentialSource: broker
+    timeoutMs: 5000
+    retry: none
+  lifecycle:
+    retention: "P365D"
+    deletionPolicy: tombstone-then-delete
+    tombstoneRef: "urn:pact:tombstone:se/design-review"
+  failure:
+    notFound: permanent
+    unauthorized: permanent
+    timeout: retryable
+    digestMismatch: permanent
+    onFailure: emit-witness-token
+  verification:
+    conformance:
+      - schema-validation
+      - digest-check
+      - media-type-check
+    suite: https://github.com/example/pact-ref-conformance/se-design-review

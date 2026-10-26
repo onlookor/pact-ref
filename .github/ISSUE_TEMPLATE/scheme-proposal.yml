@@ -1,0 +1,40 @@
+name: Scheme proposal
+description: 提议新的 URI scheme 或解析/调用机制
+title: "[scheme] "
+labels: ["area/spec", "scheme"]
+body:
+  - type: input
+    id: scheme
+    attributes:
+      label: scheme 名称
+      placeholder: "例如 mcp、oci、custom+https"
+    validations:
+      required: true
+  - type: textarea
+    id: syntax
+    attributes:
+      label: 语法
+      description: authority、path、query、fragment、定版方式
+    validations:
+      required: true
+  - type: textarea
+    id: resolution
+    attributes:
+      label: 解析/调用方式
+      description: 静态取回还是动态调用；是否需要 registry
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: 安全
+      description: SSRF、路径穿越、凭据、重定向、DNS 重绑定
+    validations:
+      required: true
+  - type: textarea
+    id: conformance
+    attributes:
+      label: 一致性用例
+      description: 正常例、错误例、安全负例
+    validations:
+      required: true
