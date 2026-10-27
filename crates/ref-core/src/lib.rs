@@ -5,75 +5,16 @@
 
 use std::fmt;
 
-/// Reference Plane 的线上 API 版本。
-pub const API_VERSION: &str = "pact.ref/v1";
+pub use pact_ref_spec::{
+    BindingMatch, ContractCard, MatchScope, RefBindings, RefRule, ReferenceForm, SpecError,
+    API_VERSION,
+};
 
-/// 票面的三种形态，对应母本 `ThingRef ::= URI | Identifier | ∅`。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReferenceForm {
-    /// 带 scheme 的 URI。
-    Uri(String),
-    /// 无 scheme 的标识符，例如 `REQ-001`。
-    Identifier(String),
-    /// 确认没有外部制品。
-    Absent,
-}
-
-impl ReferenceForm {
-    /// 对原始字符串做最小分类：有合法 scheme 视为 URI，否则视为 Identifier。
-    ///
-    /// 这里不做完整 RFC 3986 校验；完整 profile 校验由 `pact-ref-spec` 负责。
-    pub fn classify(raw: Option<&str>) -> Result<Self, ReferenceError> {
-        match raw {
-            None => Ok(Self::Absent),
-            Some(value) if value.trim().is_empty() => Err(ReferenceError::Empty),
-            Some(value) => {
-                if has_uri_scheme(value) {
-                    Ok(Self::Uri(value.to_owned()))
-                } else {
-                    Ok(Self::Identifier(value.to_owned()))
-                }
-            }
-        }
-    }
-
-    /// 返回票面字符串；`∅` 返回 `None`。
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Uri(value) | Self::Identifier(value) => Some(value),
-            Self::Absent => None,
-        }
-    }
-
-    /// 是否为“确认无制品”。
-    pub fn is_absent(&self) -> bool {
-        matches!(self, Self::Absent)
-    }
-
-    /// 返回 URI scheme；Identifier 和 `∅` 返回 `None`。
-    pub fn scheme(&self) -> Option<&str> {
-        match self {
-            Self::Uri(value) => value.split_once(':').map(|(scheme, _)| scheme),
-            Self::Identifier(_) | Self::Absent => None,
-        }
-    }
-}
-
-fn has_uri_scheme(value: &str) -> bool {
-    let Some((scheme, rest)) = value.split_once(':') else {
-        return false;
-    };
-    if scheme.is_empty() || rest.is_empty() {
-        return false;
-    }
-    let mut chars = scheme.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+/// 把规范层的引用分类错误映射为治理层错误。
+///
+/// 入口应先调用本函数完成 URI profile 校验；通过后的 [`ReferenceForm`] 在治理内部保持不透明。
+pub fn classify_reference(raw: Option<&str>) -> Result<ReferenceForm, ReferenceError> {
+    ReferenceForm::classify(raw).map_err(ReferenceError::from)
 }
 
 /// 治理层统一错误。
@@ -111,6 +52,17 @@ impl fmt::Display for ReferenceError {
 }
 
 impl std::error::Error for ReferenceError {}
+
+impl From<SpecError> for ReferenceError {
+    fn from(error: SpecError) -> Self {
+        match error {
+            SpecError::EmptyReference => Self::Empty,
+            SpecError::InvalidScheme(scheme) => Self::UnknownScheme(scheme),
+            SpecError::IdentifierNotAllowed { type_name } => Self::UnsupportedIdentifier(type_name),
+            other => Self::InvalidRequest(other.to_string()),
+        }
+    }
+}
 
 /// 解析意图。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +176,7 @@ pub trait AuditSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReferenceError, ReferenceForm};
+    use super::{classify_reference, ReferenceError, ReferenceForm, SpecError};
 
     #[test]
     fn classifies_uri_and_identifier() {
@@ -246,8 +198,17 @@ mod tests {
     fn rejects_empty_reference() {
         assert_eq!(
             ReferenceForm::classify(Some("  ")),
-            Err(ReferenceError::Empty)
+            Err(SpecError::EmptyReference)
         );
+        assert_eq!(classify_reference(Some("  ")), Err(ReferenceError::Empty));
+    }
+
+    #[test]
+    fn maps_bare_path_to_invalid_request() {
+        assert!(matches!(
+            classify_reference(Some("/tmp/a.md")),
+            Err(ReferenceError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -256,5 +217,12 @@ mod tests {
         assert_eq!(uri.scheme(), Some("mcp"));
         let identifier = ReferenceForm::classify(Some("REQ-001")).expect("identifier");
         assert_eq!(identifier.scheme(), None);
+    }
+
+    #[test]
+    fn reexports_bindings_and_contract_types() {
+        let bindings = super::RefBindings::new("demo");
+        assert_eq!(bindings.api_version, super::API_VERSION);
+        assert_eq!(bindings.kind, "RefBindings");
     }
 }

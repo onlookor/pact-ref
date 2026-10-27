@@ -23,6 +23,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+pact-ref-spec = { version = "0.1.0", path = "vendor/pact-ref-spec" }
 pact-ref-core = { path = "crates/ref-core" }
 pact-ref-resolver = { path = "crates/ref-resolver" }
 pact-ref-invoker = { path = "crates/ref-invoker" }
@@ -35,6 +36,8 @@ pact-ref-adapter-git = { path = "adapters/git" }
 pact-ref-adapter-oci = { path = "adapters/oci" }
 pact-ref-adapter-file = { path = "adapters/file" }
 pact-ref-adapter-mcp = { path = "adapters/mcp" }
+serde_json = "1"
+serde_yaml = "0.9"
 
 [profile.release]
 lto = true

@@ -1,3 +1,4 @@
 # 本仓库消费的 pact-ref-spec 版本。
-# 引导阶段尚未抽取到 pact 仓库；抽取后改为发布版本（例如 1.0.0）。
-0.1.0-bootstrap
+# 引导阶段使用 vendor/pact-ref-spec 只读快照；内容摘要见 vendor/pact-ref-spec-source.json。
+# 规范发布到注册表后，删除快照并改为纯 version 依赖。
+0.1.0-vendored

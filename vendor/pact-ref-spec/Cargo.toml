@@ -1,0 +1,12 @@
+[package]
+name = "pact-ref-spec"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PACT 物引治理的纯规范类型：URI profile、RefBindings、ContractCard、匹配与校验"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

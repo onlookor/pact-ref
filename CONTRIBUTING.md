@@ -18,10 +18,15 @@ cargo test --workspace
 
 ## 与 `pact` 的跨仓库变更
 
-1. 在 `pact` 仓库提 spec PR（URI profile、RefBindings、ContractCard、Reference Plane API）。
-2. 发布 `pact-ref-spec` 版本（引导阶段用 `SPEC_VERSION` 记录预期）。
-3. 在本仓库提实现 PR，并在描述中写明消费的 spec 版本。
+1. 在 `pact` 仓库提 spec PR（URI profile、RefBindings、ContractCard、Reference Plane API），
+   并更新 `crates/pact-ref-spec`。
+2. 在本仓库用 `scripts/sync-spec.sh --source <path-to-pact-ref-spec>` 同步 `vendor/pact-ref-spec`，
+   并提交 `vendor/pact-ref-spec-source.json` 中的内容摘要。
+3. 在本仓库提实现 PR，并在描述中写明消费的 spec 版本与摘要。
 4. 一致性测试在两个仓库都跑；跨仓库不做原子合并。
+
+规范发布到注册表后，删除 `vendor/pact-ref-spec`，依赖改为纯 `version = "..."`。
+不要在 `vendor/` 内直接编辑；所有修改先落在 `pact` 仓库的 canonical crate。
 
 ## 提交信息
 

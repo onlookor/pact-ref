@@ -15,8 +15,8 @@ spec:
     tool:
       name: build.run
       version: "3"
-      inputSchemaDigest: sha256:...
-      outputSchemaDigest: sha256:...
+      inputSchemaDigest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+      outputSchemaDigest: sha256:1111111111111111111111111111111111111111111111111111111111111111
     sideEffect: mutating
     idempotency:
       key: "token_id + request_id"
@@ -36,4 +36,4 @@ spec:
       unauthorized: permanent
   reference:
     schemes: [mcp]
-    uriPattern: "mcp://build.example.com/build-server/build.run@3#schema=sha256:..."
+    uriPattern: "mcp://build.example.com/build-server/build.run@3#schema=sha256:1111111111111111111111111111111111111111111111111111111111111111"

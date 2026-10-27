@@ -25,9 +25,18 @@
 - 凭据只从 broker / 环境注入，不写入 `ThingRef`，不写入审计。
 - 审计默认关闭；开启时只记录 ID、摘要、状态、时间。
 
+## 规范快照
+
+- `pact-ref-spec` 的 canonical 源在 `pact` 仓库 `crates/pact-ref-spec`。
+- 同步：`scripts/sync-spec.sh --source <path-to-pact-ref-spec>`；脚本会复制源码并写入
+  `vendor/pact-ref-spec-source.json`（名称、版本、内容摘要）。
+- 漂移检查：`scripts/sync-spec.sh --source <path> --check`，CI 与发布前必须通过。
+- 不要直接编辑 `vendor/pact-ref-spec`；规范发布到注册表后删除快照，依赖改为纯 `version`。
+
 ## 部署
 
-- Docker：`deploy/docker/Dockerfile`。
+- Docker：`deploy/docker/Dockerfile`，构建前可用 `deploy/docker/build.sh` 打包镜像
+  （上下文为仓库根，vendored spec 已包含在镜像构建上下文中）。
 - systemd：`deploy/systemd/pact-refd.service`。
 - 与 `pactd` 分开部署；不要在同一进程内运行。
 - 治理平面不可用时，PACT 协调仍可继续；参与者显式失败或走补偿。

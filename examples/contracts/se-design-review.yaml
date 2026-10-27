@@ -11,7 +11,7 @@ spec:
     kind: document
     mediaType: text/markdown; charset=utf-8
     schema: https://schemas.example.com/se/design-review/v2.json
-    schemaDigest: sha256:6f1c...
+    schemaDigest: sha256:6f1c000000000000000000000000000000000000000000000000000000000000
     digestPolicy: required-at-archive
   reference:
     schemes: [https, git]

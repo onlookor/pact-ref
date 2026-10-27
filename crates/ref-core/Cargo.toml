@@ -6,3 +6,8 @@ license.workspace = true
 description = "PACT 物引治理的纯类型与策略接口：零 IO、零网络"
 
 [dependencies]
+pact-ref-spec.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+serde_yaml.workspace = true

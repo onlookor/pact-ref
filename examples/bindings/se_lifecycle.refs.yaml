@@ -2,7 +2,7 @@ apiVersion: pact.ref/v1
 kind: RefBindings
 metadata:
   domain: se_lifecycle
-  declarationDigest: sha256:...
+  declarationDigest: sha256:1111111111111111111111111111111111111111111111111111111111111111
 spec:
   defaults:
     ref:

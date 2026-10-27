@@ -31,12 +31,15 @@ participants
 
 | 层 | 允许依赖 | 禁止依赖 |
 |---|---|---|
-| `ref-core` | 仅标准库 | 网络、文件、PACT engine/store |
+| `ref-core` | 标准库、`pact-ref-spec`（纯规范 crate） | 网络、文件、PACT engine/store |
 | `ref-resolver` / `ref-invoker` | `ref-core` | 具体 adapter（由装配层注入） |
 | adapters | `ref-core` | PACT engine/store、其他 adapter |
 | `ref-registry` / `ref-auth` / `ref-audit` | `ref-core` | PACT engine/store |
 | `refd` | 上述 crate | PACT store 直写 |
 | `ref-client` | `ref-core` | 具体网络实现 |
+
+`pact-ref-spec` 由 `pact` 仓库维护，无 IO、无网络、无文件系统，可编译到
+`wasm32-unknown-unknown`；引导阶段以 `vendor/pact-ref-spec` 只读快照消费，发布后改为纯版本依赖。
 
 ## 数据流
 
@@ -87,9 +90,11 @@ revoke(ref, actor, reason) -> {}
 ## 引导阶段
 
 当前 crate 只定义纯类型、trait 和占位 adapter；CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
+规范层（`pact-ref-spec` 与 `spec/ref/v1/`）已在 `pact` 仓库落地，本仓库以 vendored 快照消费。
 下一步：
 
-1. 在 `pact` 仓库抽取 `pact-ref-spec` 与 `spec/ref/v1/`，并把本仓库切换到发布版本。
+1. ~~在 `pact` 仓库抽取 `pact-ref-spec` 与 `spec/ref/v1/`，并把本仓库切换到发布版本。~~
+   已完成抽取与快照消费；待规范发布注册表后切换为纯版本依赖。
 2. 实现 `refd` 的 resolve/describe 端点。
 3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。
 4. 实现 mcp-read profile 与结果物化。

@@ -10,7 +10,11 @@ PACT 的**物引治理平面**：把 token 上的 `ThingRef` 兑现为可解析�
 
 引导阶段（bootstrap）。仓库结构、纯类型/trait 骨架、示例、部署模板与 GitHub CI 已就绪；
 `pact-refd` 目前只打印装配状态，尚未实现 HTTP 服务、真实适配器与一致性用例。
-当前 13 个单元测试覆盖引用分类、scheme 路由、注册表、授权、审计与客户端门面。
+
+规范层已抽取为 `pact` 仓库的 `pact-ref-spec` 纯 crate 与 `spec/ref/v1/` 正文。本仓库
+以 `0.1.0` + `vendor/pact-ref-spec` 只读快照的方式消费，`ref-core` 直接 re-export 规范类型，
+不再自建一套校验。当前 35 项测试覆盖引用分类、规范消费、示例契约/绑定、scheme 路由、
+注册表、授权、审计与客户端门面。
 
 ## 它解决什么
 
@@ -38,14 +42,19 @@ services/refd/         服务二进制
 adapters/              http / git / oci / file / mcp 适配器骨架
 conformance/           一致性用例与 runner 骨架
 examples/              RefBindings、ContractCard、MCP 配置示例
+vendor/                pact-ref-spec 只读快照（含来源与内容摘要）
+scripts/               spec 同步与漂移检查脚本
 deploy/                Docker / systemd 模板
 docs/                  架构、运维、ADR、scheme 说明
 ```
 
 ## 与 PACT 的关系
 
-- `pact` 仓库持有母本、参考实现，以及将来的 `pact-ref-spec` 纯 crate 与 `spec/ref/v1/`。
-- 本仓库消费 `pact-ref-spec` 的发布版本；引导阶段先用 `SPEC_VERSION` 记录预期版本。
+- `pact` 仓库持有母本、参考实现，以及 `pact-ref-spec` 纯 crate 与 `spec/ref/v1/`（URI profile、
+  RefBindings 与 ContractCard schema、Reference Plane OpenAPI）。
+- 本仓库消费 `pact-ref-spec` `0.1.0`；引导阶段使用 `vendor/pact-ref-spec` 只读快照，
+  规范发布到注册表后删除快照、只留版本号。
+- 规范变更走 `scripts/sync-spec.sh --source <path>`，`--check` 用于检测漂移。
 - 本仓库不依赖 `pact-engine`、`pact-store`，也不向 PACT 存储直写。
 - 解析成功/失败由参与者通过正常的 `seed` / `produce` 产生 witness token 记录。
 
