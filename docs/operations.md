@@ -30,7 +30,8 @@
 - `pact-ref-spec` 的 canonical 源在 `pact` 仓库 `crates/pact-ref-spec`。
 - 同步：`scripts/sync-spec.sh --source <path-to-pact-ref-spec>`；脚本会复制源码并写入
   `vendor/pact-ref-spec-source.json`（名称、版本、内容摘要）。
-- 漂移检查：`scripts/sync-spec.sh --source <path> --check`，CI 与发布前必须通过。
+- 漂移检查：`scripts/sync-spec.sh --source <path> --check`；发布前必须通过，CI 在能访问
+  canonical 源时也应执行。
 - 不要直接编辑 `vendor/pact-ref-spec`；规范发布到注册表后删除快照，依赖改为纯 `version`。
 
 ## 部署
