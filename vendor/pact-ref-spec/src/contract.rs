@@ -56,7 +56,7 @@ impl ContractCard {
             validate_parties(parties)?;
         }
         if let Some(lifecycle) = &self.spec.lifecycle {
-            validate_lifecycle(lifecycle)?;
+            validate_lifecycle(lifecycle, &self.spec.reference)?;
         }
         if let Some(verification) = &self.spec.verification {
             validate_verification(verification)?;
@@ -293,10 +293,24 @@ pub enum ResolutionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lifecycle {
+    /// 内容保留期：`permanent` 或正 ISO 8601 duration（如 `P365D`）。
     pub retention: String,
-    pub deletion_policy: String,
+    pub deletion_policy: DeletionPolicy,
+    /// tombstone 发布位置的 URI（仅 `tombstone-then-delete` 允许出现）。
     #[serde(default)]
     pub tombstone_ref: Option<String>,
+}
+
+/// 删除策略（D44）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeletionPolicy {
+    /// 保留内容，不自动删除。
+    Retain,
+    /// 到期删除内容，不发布 tombstone；归档钉版的契约不得使用。
+    Delete,
+    /// 到期先发布 tombstone，再删除内容；必须声明 `tombstoneRef`。
+    TombstoneThenDelete,
 }
 
 /// 验收方式。
@@ -526,10 +540,53 @@ fn validate_parties(parties: &Parties) -> Result<(), SpecError> {
     Ok(())
 }
 
-fn validate_lifecycle(lifecycle: &Lifecycle) -> Result<(), SpecError> {
-    if lifecycle.retention.trim().is_empty() || lifecycle.deletion_policy.trim().is_empty() {
+fn validate_lifecycle(
+    lifecycle: &Lifecycle,
+    reference: &ReferenceContract,
+) -> Result<(), SpecError> {
+    if !crate::is_valid_retention(&lifecycle.retention) {
+        return Err(SpecError::InvalidContract(format!(
+            "lifecycle.retention must be `permanent` or a positive ISO 8601 duration such as P365D: {}",
+            lifecycle.retention
+        )));
+    }
+
+    match lifecycle.deletion_policy {
+        DeletionPolicy::TombstoneThenDelete => {
+            let Some(tombstone_ref) = lifecycle.tombstone_ref.as_deref() else {
+                return Err(SpecError::InvalidContract(
+                    "deletionPolicy=tombstone-then-delete requires lifecycle.tombstoneRef"
+                        .to_owned(),
+                ));
+            };
+            let form = ReferenceForm::classify(Some(tombstone_ref)).map_err(|error| {
+                SpecError::InvalidContract(format!("lifecycle.tombstoneRef must be a URI: {error}"))
+            })?;
+            if !form.is_uri() {
+                return Err(SpecError::InvalidContract(
+                    "lifecycle.tombstoneRef must be a URI".to_owned(),
+                ));
+            }
+        }
+        DeletionPolicy::Retain | DeletionPolicy::Delete => {
+            if lifecycle.tombstone_ref.is_some() {
+                return Err(SpecError::InvalidContract(
+                    "lifecycle.tombstoneRef is only allowed with deletionPolicy=tombstone-then-delete"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
+    let archive_pinned = reference
+        .pinning
+        .as_ref()
+        .map(|pinning| pinning.required_for_archive)
+        .unwrap_or(false);
+    if archive_pinned && lifecycle.deletion_policy == DeletionPolicy::Delete {
         return Err(SpecError::InvalidContract(
-            "lifecycle.retention and lifecycle.deletionPolicy must not be empty".to_owned(),
+            "deletionPolicy=delete is not allowed for archive-pinned contracts; use retain or tombstone-then-delete"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -699,5 +756,64 @@ mod tests {
         let json = serde_json::to_string(&card).expect("serialize");
         let again: ContractCard = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(card, again);
+    }
+
+    #[test]
+    fn validates_retention_forms() {
+        assert!(crate::is_valid_retention("permanent"));
+        assert!(crate::is_valid_retention("P365D"));
+        assert!(crate::is_valid_retention("P1Y6M"));
+        assert!(crate::is_valid_retention("P2W"));
+        assert!(crate::is_valid_retention("PT12H"));
+        assert!(crate::is_valid_retention("P1DT2H3M4S"));
+        for invalid in [
+            "", "P", "PT", "P0D", "0D", "365 days", "P1D2D", "P1W1D", "P1M1Y", "PT1S1H", "P-1D",
+            "P1.5D",
+        ] {
+            assert!(
+                !crate::is_valid_retention(invalid),
+                "应拒绝保留期 {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_lifecycle_combinations() {
+        let mut card: ContractCard = serde_json::from_str(STATIC_CARD).expect("card");
+        card.spec.lifecycle.as_mut().expect("lifecycle").retention = "P0D".to_owned();
+        assert!(card.validate().is_err());
+
+        let mut card: ContractCard = serde_json::from_str(STATIC_CARD).expect("card");
+        card.spec
+            .lifecycle
+            .as_mut()
+            .expect("lifecycle")
+            .tombstone_ref = None;
+        assert!(card.validate().is_err());
+
+        let mut card: ContractCard = serde_json::from_str(STATIC_CARD).expect("card");
+        let lifecycle = card.spec.lifecycle.as_mut().expect("lifecycle");
+        lifecycle.deletion_policy = crate::DeletionPolicy::Retain;
+        assert!(card.validate().is_err());
+
+        let mut card: ContractCard = serde_json::from_str(STATIC_CARD).expect("card");
+        let lifecycle = card.spec.lifecycle.as_mut().expect("lifecycle");
+        lifecycle.deletion_policy = crate::DeletionPolicy::Delete;
+        lifecycle.tombstone_ref = None;
+        assert!(
+            card.validate().is_err(),
+            "归档钉版的契约不得无 tombstone 删除"
+        );
+    }
+
+    #[test]
+    fn tombstone_ref_must_be_uri() {
+        let mut card: ContractCard = serde_json::from_str(STATIC_CARD).expect("card");
+        card.spec
+            .lifecycle
+            .as_mut()
+            .expect("lifecycle")
+            .tombstone_ref = Some("not a uri".to_owned());
+        assert!(card.validate().is_err());
     }
 }

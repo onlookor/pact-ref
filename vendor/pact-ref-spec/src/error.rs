@@ -25,6 +25,8 @@ pub enum SpecError {
     InvalidBindings(String),
     /// ContractCard 结构或取值不合法。
     InvalidContract(String),
+    /// Tombstone 结构或取值不合法。
+    InvalidTombstone(String),
     /// 该类型要求物引，但票面是 `∅`。
     ReferenceRequired,
     /// 该类型不允许当前 scheme。
@@ -55,6 +57,7 @@ impl fmt::Display for SpecError {
             Self::InvalidDigest(value) => write!(f, "invalid sha256 digest: {value}"),
             Self::InvalidBindings(message) => write!(f, "invalid RefBindings: {message}"),
             Self::InvalidContract(message) => write!(f, "invalid ContractCard: {message}"),
+            Self::InvalidTombstone(message) => write!(f, "invalid Tombstone: {message}"),
             Self::ReferenceRequired => f.write_str("reference is required by RefBindings"),
             Self::SchemeNotAllowed { scheme, type_name } => {
                 write!(f, "scheme {scheme} is not allowed for type {type_name}")
