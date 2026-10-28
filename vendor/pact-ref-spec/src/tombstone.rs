@@ -187,14 +187,16 @@ fn parse_rfc3339_utc(value: &str) -> Option<(i32, u32, u32, u32, u32, u32, u32)>
     {
         return None;
     }
-    let year = digits(&value[0..4])? as i32;
-    let month = digits(&value[5..7])?;
-    let day = digits(&value[8..10])?;
-    let hour = digits(&value[11..13])?;
-    let minute = digits(&value[14..16])?;
-    let second = digits(&value[17..19])?;
+    // 用 `get` 而不是切片：输入可能含多字节字符，固定字节下标不一定落在
+    // 字符边界上；越界或非边界一律视为非法时间戳，不 panic。
+    let year = digits(value.get(0..4)?)? as i32;
+    let month = digits(value.get(5..7)?)?;
+    let day = digits(value.get(8..10)?)?;
+    let hour = digits(value.get(11..13)?)?;
+    let minute = digits(value.get(14..16)?)?;
+    let second = digits(value.get(17..19)?)?;
 
-    let fraction = &value[19..value.len() - 1];
+    let fraction = value.get(19..value.len() - 1)?;
     let nanos = if fraction.is_empty() {
         0
     } else {
@@ -301,6 +303,15 @@ mod tests {
     fn rejects_bare_path_reference() {
         let mut tombstone: Tombstone = serde_json::from_str(TOMBSTONE).expect("tombstone");
         tombstone.spec.reference = "/tmp/artifact.md".to_owned();
+        let error = tombstone.validate().expect_err("reject");
+        assert!(matches!(error, SpecError::InvalidTombstone(_)));
+    }
+
+    /// 非 ASCII 字符落在固定字段边界内时不得 panic，只报校验错误。
+    #[test]
+    fn rejects_non_ascii_timestamp_without_panicking() {
+        let mut tombstone: Tombstone = serde_json::from_str(TOMBSTONE).expect("tombstone");
+        tombstone.spec.deleted_at = "2026-10-27T00:00:0éZ".to_owned();
         let error = tombstone.validate().expect_err("reject");
         assert!(matches!(error, SpecError::InvalidTombstone(_)));
     }
