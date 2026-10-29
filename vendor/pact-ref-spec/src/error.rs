@@ -35,6 +35,10 @@ pub enum SpecError {
     SchemeNotAllowed { scheme: String, type_name: String },
     /// 该类型不允许无 scheme 的 Identifier。
     IdentifierNotAllowed { type_name: String },
+    /// 票面形态与 `value` 声明不符。
+    ValueFormMismatch { expected: String, actual: String },
+    /// 绑定要求钉版，但票面没有内容摘要。
+    PinningRequired { type_name: String, at_archive: bool },
 }
 
 impl fmt::Display for SpecError {
@@ -73,6 +77,25 @@ impl fmt::Display for SpecError {
                     f,
                     "identifier without scheme is not allowed for type {type_name}"
                 )
+            }
+            Self::ValueFormMismatch { expected, actual } => {
+                write!(f, "reference must be {expected}, got {actual}")
+            }
+            Self::PinningRequired {
+                type_name,
+                at_archive,
+            } => {
+                if *at_archive {
+                    write!(
+                        f,
+                        "type {type_name} requires a pinned reference (sha256 digest) before archiving"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "type {type_name} requires a pinned reference (sha256 digest)"
+                    )
+                }
             }
         }
     }

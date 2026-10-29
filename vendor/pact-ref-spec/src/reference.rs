@@ -110,12 +110,50 @@ pub fn classify_reference(raw: Option<&str>) -> Result<ReferenceForm, SpecError>
     ReferenceForm::classify(raw)
 }
 
-fn classify_identifier(value: &str) -> Result<ReferenceForm, SpecError> {
+/// 把字符串按 Identifier 文法重新分类（`onUnknownScheme: treat-as-identifier`）。
+///
+/// 用于“形似 URI、但 scheme 未在白名单内”的票面：此时按 Identifier 处理，
+/// 仍需 `allowIdentifier` 放行。
+pub fn classify_identifier(value: &str) -> Result<ReferenceForm, SpecError> {
     if is_valid_identifier(value) {
         Ok(ReferenceForm::Identifier(value.to_owned()))
     } else {
         Err(SpecError::InvalidIdentifier(value.to_owned()))
     }
+}
+
+/// 提取钉版摘要：`sha256:<64 位小写十六进制>` 或 `#sha256=<64 位小写十六进制>`。
+///
+/// 覆盖 uri-profile §4 的两种写法（OCI `@sha256:…` 与 URL fragment `#sha256=…`）。
+/// 返回值是 64 位十六进制本身，不含算法前缀。
+pub fn pinned_digest(value: &str) -> Option<&str> {
+    const HEX_LEN: usize = 64;
+    let mut cursor = 0;
+    while let Some(offset) = value[cursor..].find("sha256") {
+        let marker_end = cursor + offset + "sha256".len();
+        let rest = &value[marker_end..];
+        let mut chars = rest.chars();
+        if !matches!(chars.next(), Some(':') | Some('=')) {
+            cursor = marker_end;
+            continue;
+        }
+        let hex = &rest[1..];
+        if hex.len() >= HEX_LEN {
+            let candidate = &hex[..HEX_LEN];
+            let is_hex = candidate
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            let boundary = hex[HEX_LEN..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_hexdigit());
+            if is_hex && boundary {
+                return Some(candidate);
+            }
+        }
+        cursor = marker_end;
+    }
+    None
 }
 
 /// Identifier 文法：`1*(ALPHA / DIGIT / "_" / "-" / "." / ":" / "/" / "@" / "#")`。
@@ -287,5 +325,31 @@ mod tests {
             ReferenceForm::classify_with_limit(Some(&long), 32),
             Err(SpecError::TooLong { max: 32, .. })
         ));
+    }
+
+    #[test]
+    fn detects_pinned_digests() {
+        use super::pinned_digest;
+
+        let hex = "9f".repeat(32);
+        assert_eq!(
+            pinned_digest(&format!("https://artifacts.example.com/d#sha256={hex}")),
+            Some(hex.as_str())
+        );
+        assert_eq!(
+            pinned_digest(&format!(
+                "oci://registry.example.com/team/image@sha256:{hex}"
+            )),
+            Some(hex.as_str())
+        );
+        assert!(pinned_digest("https://example.com/design").is_none());
+        assert!(pinned_digest("REQ-001").is_none());
+        assert!(pinned_digest(&format!(
+            "https://example.com/d#sha256={}",
+            hex.to_uppercase()
+        ))
+        .is_none());
+        assert!(pinned_digest(&format!("https://example.com/d#sha256={}", &hex[..62])).is_none());
+        assert!(pinned_digest(&format!("https://example.com/d#sha256={hex}0")).is_none());
     }
 }

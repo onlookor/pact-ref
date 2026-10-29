@@ -89,12 +89,89 @@ impl RefBindings {
     /// 按 `defaults → scheme → type → instance/type` 的继承链求有效规则，并校验票面。
     ///
     /// `instance` 为 `None` 时只做域级匹配。
+    ///
+    /// `onUnknownScheme` 生效范围：仅当有效 `schemes` 非空且不含 `*` 时，
+    /// scheme 不在白名单才算“未知”。`reject`（缺省）在此拒绝；
+    /// `allow` / `treat-as-identifier` 放行给调用方继续判定（见 D46）。
     pub fn resolve(
         &self,
         instance: Option<&str>,
         type_name: &str,
         reference: &ReferenceForm,
     ) -> Result<BindingMatch, SpecError> {
+        let (rule, scope) = self.merged_rule_with_scope(instance, type_name, reference);
+
+        let required = rule.required.unwrap_or(false);
+        match reference {
+            ReferenceForm::Absent => {
+                if required {
+                    return Err(SpecError::ReferenceRequired);
+                }
+            }
+            ReferenceForm::Identifier(_) => {
+                if !rule.allow_identifier.unwrap_or(false) {
+                    return Err(SpecError::IdentifierNotAllowed {
+                        type_name: type_name.to_owned(),
+                    });
+                }
+            }
+            ReferenceForm::Uri(value) => {
+                let scheme = reference.scheme().unwrap_or_default();
+                if let Some(allowed) = &rule.schemes {
+                    let unknown = !allowed.is_empty()
+                        && !allowed
+                            .iter()
+                            .any(|candidate| candidate == "*" || candidate == scheme);
+                    if unknown
+                        && rule
+                            .on_unknown_scheme
+                            .unwrap_or(UnknownSchemePolicy::Reject)
+                            == UnknownSchemePolicy::Reject
+                    {
+                        return Err(SpecError::SchemeNotAllowed {
+                            scheme: scheme.to_owned(),
+                            type_name: type_name.to_owned(),
+                        });
+                    }
+                }
+                if let Some(max) = rule.max_length {
+                    if value.len() > max {
+                        return Err(SpecError::TooLong {
+                            actual: value.len(),
+                            max,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(BindingMatch {
+            type_name: type_name.to_owned(),
+            scope,
+            rule,
+        })
+    }
+
+    /// 只合并继承链、不做票面校验。
+    ///
+    /// 供运行期“归档钉版”等只读取策略字段的场景使用：历史票面可能已不符合
+    /// 收紧后的规则，但钉版要求仍需按当前绑定生效。
+    pub fn merged_rule(
+        &self,
+        instance: Option<&str>,
+        type_name: &str,
+        reference: &ReferenceForm,
+    ) -> RefRule {
+        self.merged_rule_with_scope(instance, type_name, reference)
+            .0
+    }
+
+    fn merged_rule_with_scope(
+        &self,
+        instance: Option<&str>,
+        type_name: &str,
+        reference: &ReferenceForm,
+    ) -> (RefRule, MatchScope) {
         let mut rule = RefRule::default();
         let mut scope = MatchScope::None;
 
@@ -124,50 +201,7 @@ impl RefBindings {
             }
         }
 
-        let required = rule.required.unwrap_or(false);
-        match reference {
-            ReferenceForm::Absent => {
-                if required {
-                    return Err(SpecError::ReferenceRequired);
-                }
-            }
-            ReferenceForm::Identifier(_) => {
-                if !rule.allow_identifier.unwrap_or(false) {
-                    return Err(SpecError::IdentifierNotAllowed {
-                        type_name: type_name.to_owned(),
-                    });
-                }
-            }
-            ReferenceForm::Uri(value) => {
-                let scheme = reference.scheme().unwrap_or_default();
-                if let Some(allowed) = &rule.schemes {
-                    if !allowed.is_empty()
-                        && !allowed
-                            .iter()
-                            .any(|candidate| candidate == "*" || candidate == scheme)
-                    {
-                        return Err(SpecError::SchemeNotAllowed {
-                            scheme: scheme.to_owned(),
-                            type_name: type_name.to_owned(),
-                        });
-                    }
-                }
-                if let Some(max) = rule.max_length {
-                    if value.len() > max {
-                        return Err(SpecError::TooLong {
-                            actual: value.len(),
-                            max,
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(BindingMatch {
-            type_name: type_name.to_owned(),
-            scope,
-            rule,
-        })
+        (rule, scope)
     }
 }
 
@@ -312,6 +346,19 @@ impl BindingMatch {
     pub fn allowed_schemes(&self) -> Option<&[String]> {
         self.rule.schemes.as_deref()
     }
+
+    /// 写入时即要求钉版（`pinning: required`）。
+    pub fn pins_at_entry(&self) -> bool {
+        self.rule.pinning == Some(PinningRequirement::Required)
+    }
+
+    /// 进入 Archive 前要求钉版（`required` 也覆盖归档）。
+    pub fn pins_at_archive(&self) -> bool {
+        matches!(
+            self.rule.pinning,
+            Some(PinningRequirement::Required | PinningRequirement::RequiredAtArchive)
+        )
+    }
 }
 
 fn validate_rule(rule: &RefRule, context: &str) -> Result<(), SpecError> {
@@ -342,6 +389,11 @@ fn validate_rule(rule: &RefRule, context: &str) -> Result<(), SpecError> {
         if !matches!(value.as_str(), "none" | "uri" | "identifier") {
             return Err(SpecError::InvalidBindings(format!(
                 "{context} value must be none, uri or identifier"
+            )));
+        }
+        if value == "none" && rule.required == Some(true) {
+            return Err(SpecError::InvalidBindings(format!(
+                "{context} cannot set required=true with value=none"
             )));
         }
     }
@@ -449,6 +501,70 @@ mod tests {
         assert!(matches!(
             bindings.validate(),
             Err(SpecError::InvalidDomain(_))
+        ));
+    }
+
+    fn policy(value: &str) -> RefBindings {
+        let json = format!(
+            r#"{{
+              "apiVersion": "pact.ref/v1",
+              "kind": "RefBindings",
+              "metadata": {{ "domain": "demo" }},
+              "spec": {{
+                "types": {{
+                  "design": {{ "ref": {value} }}
+                }}
+              }}
+            }}"#
+        );
+        serde_json::from_str(&json).expect("bindings")
+    }
+
+    #[test]
+    fn honours_unknown_scheme_policies() {
+        use super::UnknownSchemePolicy;
+
+        let reference = ReferenceForm::classify(Some("mcp://build.example.com/run")).expect("uri");
+        let allow = policy(r#"{ "schemes": ["https"], "onUnknownScheme": "allow" }"#);
+        allow.validate().expect("valid");
+        let matched = allow.resolve(None, "design", &reference).expect("allow");
+        assert_eq!(
+            matched.rule.on_unknown_scheme,
+            Some(UnknownSchemePolicy::Allow)
+        );
+
+        let treat = policy(r#"{ "schemes": ["https"], "onUnknownScheme": "treat-as-identifier" }"#);
+        treat.validate().expect("valid");
+        let matched = treat
+            .resolve(None, "design", &reference)
+            .expect("treat-as-identifier");
+        assert_eq!(
+            matched.rule.on_unknown_scheme,
+            Some(UnknownSchemePolicy::TreatAsIdentifier)
+        );
+
+        let reject = policy(r#"{ "schemes": ["https"] }"#);
+        assert!(matches!(
+            reject.resolve(None, "design", &reference),
+            Err(SpecError::SchemeNotAllowed { .. })
+        ));
+    }
+
+    #[test]
+    fn merged_rule_skips_entry_checks() {
+        let bindings = parse();
+        let reference = ReferenceForm::classify(Some("REQ-001")).expect("identifier");
+        // 入口规则会拒绝 Identifier；合并只读取策略，供归档检查使用。
+        let rule = bindings.merged_rule(None, "design", &reference);
+        assert_eq!(rule.contract.as_deref(), Some("se/design@1"));
+    }
+
+    #[test]
+    fn rejects_required_with_value_none() {
+        let bindings = policy(r#"{ "required": true, "value": "none" }"#);
+        assert!(matches!(
+            bindings.validate(),
+            Err(SpecError::InvalidBindings(_))
         ));
     }
 }
