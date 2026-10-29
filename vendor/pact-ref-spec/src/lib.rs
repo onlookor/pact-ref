@@ -25,6 +25,7 @@ pub use contract::{
 pub use error::SpecError;
 pub use reference::{
     classify_reference, PinningRequirement, ReferenceForm, DEFAULT_MAX_REFERENCE_LENGTH,
+    HARD_MAX_REFERENCE_LENGTH,
 };
 pub use tombstone::{Tombstone, TombstoneMetadata, TombstoneReason, TombstoneSpec, TOMBSTONE_KIND};
 

@@ -17,6 +17,8 @@ pub enum SpecError {
     InvalidScheme(String),
     /// URI authority 中包含 `userinfo`。
     UserInfoNotAllowed,
+    /// 无 scheme 的 Identifier 含不允许的字符。
+    InvalidIdentifier(String),
     /// 域/实例名不合法。
     InvalidDomain(String),
     /// 摘要格式不合法。
@@ -53,6 +55,10 @@ impl fmt::Display for SpecError {
             Self::MalformedUri(message) => write!(f, "malformed URI: {message}"),
             Self::InvalidScheme(scheme) => write!(f, "invalid scheme: {scheme}"),
             Self::UserInfoNotAllowed => f.write_str("URI userinfo is not allowed in ThingRef"),
+            Self::InvalidIdentifier(value) => write!(
+                f,
+                "identifier contains characters outside ALPHA/DIGIT/_/-/./:/@/#: {value}"
+            ),
             Self::InvalidDomain(value) => write!(f, "invalid domain or instance name: {value}"),
             Self::InvalidDigest(value) => write!(f, "invalid sha256 digest: {value}"),
             Self::InvalidBindings(message) => write!(f, "invalid RefBindings: {message}"),

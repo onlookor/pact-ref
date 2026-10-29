@@ -1,9 +1,14 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::SpecError;
 
 /// 默认引用长度上限（字节）。
 pub const DEFAULT_MAX_REFERENCE_LENGTH: usize = 2048;
+
+/// 硬上限：RefBindings/ContractCard 可声明的最大引用长度（字节）。
+pub const HARD_MAX_REFERENCE_LENGTH: usize = 65_536;
 
 /// 票面的三种形态，对应母本 `ThingRef ::= URI | Identifier | ∅`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,10 +54,10 @@ impl ReferenceForm {
         }
 
         let Some((scheme, rest)) = value.split_once(':') else {
-            return Ok(Self::Identifier(value.to_owned()));
+            return classify_identifier(value);
         };
         if rest.is_empty() || !is_valid_scheme_text(scheme) {
-            return Ok(Self::Identifier(value.to_owned()));
+            return classify_identifier(value);
         }
         if has_userinfo(value, scheme) {
             return Err(SpecError::UserInfoNotAllowed);
@@ -100,11 +105,25 @@ impl fmt::Display for ReferenceForm {
     }
 }
 
-use std::fmt;
-
 /// 把分类错误映射为治理层常用错误；调用方也可以直接使用 [`ReferenceForm::classify`]。
 pub fn classify_reference(raw: Option<&str>) -> Result<ReferenceForm, SpecError> {
     ReferenceForm::classify(raw)
+}
+
+fn classify_identifier(value: &str) -> Result<ReferenceForm, SpecError> {
+    if is_valid_identifier(value) {
+        Ok(ReferenceForm::Identifier(value.to_owned()))
+    } else {
+        Err(SpecError::InvalidIdentifier(value.to_owned()))
+    }
+}
+
+/// Identifier 文法：`1*(ALPHA / DIGIT / "_" / "-" / "." / ":" / "/" / "@" / "#")`。
+fn is_valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/' | '@' | '#')
+        })
 }
 
 fn looks_like_bare_path(value: &str) -> bool {
@@ -134,6 +153,10 @@ fn is_valid_scheme_text(value: &str) -> bool {
     value.len() <= 32 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
+/// URI authority 是否带密码型 userinfo（`user:pass@`）。
+///
+/// 纯用户名（如 `git+ssh://git@example.com/...`）是 v1 profile 的合法示例，不视为凭据；
+/// 含 `:` 的 userinfo 才拒绝。用户名本身是否被用作 token 无法静态判断，见治理文档的残余风险。
 fn has_userinfo(value: &str, scheme: &str) -> bool {
     let prefix = format!("{}://", scheme.to_ascii_lowercase());
     let lower = value.to_ascii_lowercase();
@@ -145,7 +168,9 @@ fn has_userinfo(value: &str, scheme: &str) -> bool {
         .split(['/', '?', '#'])
         .next()
         .unwrap_or("");
-    authority.contains('@')
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _host)| userinfo.contains(':'))
 }
 
 /// 引用钉版强度。
@@ -219,6 +244,40 @@ mod tests {
             ReferenceForm::classify(Some("https://example.com/a\nb")),
             Err(SpecError::ControlCharacter('\n'))
         ));
+    }
+
+    #[test]
+    fn allows_ssh_username_but_rejects_password_userinfo() {
+        let ssh = ReferenceForm::classify(Some("git+ssh://git@example.com/org/repo@v1.2.3"))
+            .expect("v1 profile 的合法示例");
+        assert_eq!(ssh.scheme(), Some("git+ssh"));
+        assert_eq!(
+            ReferenceForm::classify(Some("https://user:pass@example.com/a")),
+            Err(SpecError::UserInfoNotAllowed)
+        );
+        assert!(ReferenceForm::classify(Some("https://user@example.com/a")).is_ok());
+    }
+
+    #[test]
+    fn rejects_identifier_characters_outside_grammar() {
+        for raw in ["foo bar", "foo?bar", "foo%20bar", "需求文档"] {
+            assert!(
+                matches!(
+                    ReferenceForm::classify(Some(raw)),
+                    Err(SpecError::InvalidIdentifier(_))
+                ),
+                "{raw} should be rejected"
+            );
+        }
+        for raw in ["REQ-001", "task_1.2/sub-item", "req@archive#3"] {
+            assert!(
+                matches!(
+                    ReferenceForm::classify(Some(raw)),
+                    Ok(ReferenceForm::Identifier(_))
+                ),
+                "{raw} should be accepted"
+            );
+        }
     }
 
     #[test]
