@@ -65,7 +65,7 @@ participants
 4. 结果按内容寻址写入 `[materialize].dir/<sha256>.json`，返回 `file://` 的 `resultRef`
    与 `sha256:` 的 `resultDigest`；参与者随后用 `/v1/resolve` 读取，并产生新的 witness token。
 5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据；上游失败记 `status=failed`。
-6. `mcp-mutating` 不在本层实现，动态写阶段另行定案。
+6. `mcp-mutating` 见下节「动态 mutate（写入）」。
 
 ### 动态 mutate（写入，已实现）
 
@@ -79,7 +79,9 @@ participants
 4. 成功结果与只读阶段一致地物化为内容寻址静态引用；参与者随后经 `/v1/resolve` 读取并
    以正常 `seed`/`produce` 产生 witness token。
 5. 每次写 attempt 两条审计（`intent`/`result`）；`intent` 审计失败不触达上游。
-6. 不做自动 saga/补偿；撤销另立写卡片。实现见 `pact` 仓库 `docs/design.md` §9.20。
+6. 不做自动 saga/补偿；撤销另立写卡片。实现见 `pact` 仓库 `docs/design.md` §9.20，
+   witness/compensation 可运行示例见 `examples/witness-compensation/`（`README.md` 给出
+   两条路径与离线校验命令，`services/refd/tests/witness_compensation.rs` 为离线回归）。
 
 ## Reference Plane API（resolve/describe/invoke/mutate 均已实现）
 
@@ -236,8 +238,10 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
    `git`/`oci` 仍待实现。
 4. ~~实现 `mcp-read` profile 与结果物化。~~ 已完成（2026-10-31）：`POST /v1/invoke`、
    只读闸门、引用归属校验、`mcp` adapter 的 JSON-RPC `tools/call`、内容寻址物化与
-   启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。`mcp-mutating` 契约已定案
-   （2026-10-31，FR37/D53），实现待做。
+   启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。
+   ~~`mcp-mutating`（FR37/D53）实现待做。~~ 已完成（2026-10-31）：`POST /v1/mutate`、
+   幂等台账（intent/result 两阶段 fsync、重放、`409`、`503 JournalFull`）、两阶段审计；
+   witness/compensation 示例与离线回归见 `examples/witness-compensation/`。
 5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
 6. ~~实现 OIDC（JWT/JWKS）验证器。~~ 已完成（2026-10-31）：`ref-auth` 的
    `OidcAuthenticator` + `JwksSource`，`refd` 的 `[auth.oidc]` 与

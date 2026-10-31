@@ -1,0 +1,53 @@
+# witness / compensation 示例配置（治理 §13.8.7）
+#
+# 运行：refd examples/witness-compensation/refd.toml
+# 示例中的 `token` 仅用于本地演示，部署前必须替换并以环境/密钥管理注入。
+
+[server]
+bind = "127.0.0.1:18090"
+allow_plaintext = true
+
+[auth]
+mode = "static"
+
+[auth.static]
+allow = true
+token = "release-demo-token"
+subject = "release-bot"
+scopes = ["ref:resolve", "ref:describe", "ref:mutate"]
+
+[audit]
+path = "audit.jsonl"
+
+# 物化结果落在 materialized/ 下；resolve 该目录内的 file:// 引用需要 file adapter。
+[adapter.file]
+root = "materialized"
+
+[[acl]]
+principal = "release-bot"
+domains = ["release"]
+types = ["deployment", "release_receipt", "rollback"]
+schemes = ["mcp", "file"]
+operations = ["resolve:read", "describe", "mutate"]
+
+[[profiles]]
+domain = "release"
+type = "deployment"
+card = "cards/release-deploy.yaml"
+
+[[profiles]]
+domain = "release"
+type = "rollback"
+card = "cards/release-rollback.yaml"
+
+[[mcp_servers]]
+id = "mcp://ops.example.com/release-server"
+endpoint = "https://ops.example.com/mcp"
+timeout_ms = 30000
+
+[materialize]
+dir = "materialized"
+
+[mutate]
+journal = "mutate.jsonl"
+max_entries = 1024

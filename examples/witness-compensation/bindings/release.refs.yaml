@@ -1,0 +1,38 @@
+apiVersion: pact.ref/v1
+kind: RefBindings
+metadata:
+  domain: release
+  declarationDigest: sha256:b5e86b907014fcbdbb26a02a9a678eef426e67beaa6514d875bc93adfac95b96
+spec:
+  defaults:
+    ref:
+      required: true
+      visibility: read-gate
+      # `refd` 物化结果形如 `file://.../<64hex>.json`，本身不带 `sha256:` 摘要片段；
+      # 因而默认不要求钉版。需要 `required-at-archive` 时，参与者应在写入 PACT 前
+      # 追加 `#sha256=<resultDigest>`（见 README「边界」）。
+      pinning: optional
+      schemes: [mcp, file, https]
+      onUnknownScheme: reject
+  types:
+    # 源类型由参与者 seed，不经 refd 解析，故不要求契约。
+    release_request:
+      ref:
+        required: false
+        schemes: [https, git]
+    incident:
+      ref:
+        required: false
+        schemes: [https]
+    deployment:
+      ref:
+        schemes: [file, mcp]
+        contract: release/deploy@1
+    release_receipt:
+      ref:
+        schemes: [file, mcp]
+        contract: release/deploy@1
+    rollback:
+      ref:
+        schemes: [file, mcp]
+        contract: release/rollback@1

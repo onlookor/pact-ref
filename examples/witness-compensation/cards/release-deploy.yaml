@@ -1,0 +1,46 @@
+apiVersion: pact.ref/v1
+kind: ContractCard
+metadata:
+  id: release/deploy
+  version: "1"
+  owner: release-platform
+  status: active
+spec:
+  capability:
+    kind: mcp-tool
+    server:
+      id: mcp://ops.example.com/release-server
+      trustAnchor: https://ops.example.com/.well-known/mcp
+      protocol: "2025-06-18"
+    tool:
+      name: release.deploy
+      version: "1"
+      inputSchemaDigest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+      outputSchemaDigest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+    sideEffect: mutating
+    idempotency:
+      key: "release_id + idempotency_key"
+      semantics: at-most-once
+    result:
+      materialization: required
+      returns: urn:pact:artifact:release-receipt
+      recordDigest: true
+    auth:
+      audience: pact-ref
+      scopes: [release:deploy]
+      credentialSource: broker
+    timeoutMs: 600000
+    failure:
+      timeout: retryable-with-idempotency-key
+      deployFailed: permanent
+      unauthorized: permanent
+      # 仅提示：成功写后由参与者产生 witness token（PACT 侧 seed/produce）。
+      onFailure: emit-witness-token
+      # 保留键：指向补偿能力，refd 不会自动调用（治理 §13.8.7）。
+      compensation: mcp://ops.example.com/release-server/release.rollback
+  lifecycle:
+    retention: P365D
+    deletionPolicy: retain
+  reference:
+    schemes: [mcp, file]
+    uriPattern: "mcp://ops.example.com/release-server/release.deploy@1#schema=sha256:2222222222222222222222222222222222222222222222222222222222222222"
