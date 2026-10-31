@@ -3,7 +3,9 @@ name = "pact-ref-conformance-runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PACT 物引一致性测试 runner 骨架"
+description = "PACT 物引一致性测试 runner"
 
 [dependencies]
-pact-ref-core.workspace = true
+pact-ref-spec.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true

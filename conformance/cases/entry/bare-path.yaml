@@ -1,0 +1,12 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/bare-path
+spec:
+  type: design
+  reference:
+    state: value
+    value: /tmp/a.md
+expect:
+  outcome: error
+  error: InvalidThingRef
+  reason: BarePath

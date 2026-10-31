@@ -1,0 +1,23 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/value-uri-mismatch
+spec:
+  type: design
+  reference:
+    state: value
+    value: REQ-001
+  bindings:
+    apiVersion: pact.ref/v1
+    kind: RefBindings
+    metadata:
+      domain: demo
+    spec:
+      types:
+        design:
+          ref:
+            value: uri
+            allowIdentifier: true
+expect:
+  outcome: error
+  error: InvalidThingRef
+  reason: ValueFormMismatch

@@ -1,0 +1,11 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/identifier-without-bindings
+spec:
+  type: design
+  reference:
+    state: value
+    value: REQ-001
+expect:
+  outcome: ok
+  reference: REQ-001

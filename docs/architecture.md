@@ -257,7 +257,10 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
    ~~`mcp-mutating`（FR37/D53）实现待做。~~ 已完成（2026-10-31）：`POST /v1/mutate`、
    幂等台账（intent/result 两阶段 fsync、重放、`409`、`503 JournalFull`）、两阶段审计；
    witness/compensation 示例与离线回归见 `examples/witness-compensation/`。
-5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
+5. ~~加入一致性测试与审计边车。~~ `refd` 审计已落地；conformance runner 已实现（2026-10-31）：
+   读取 `conformance/cases/**/*.yaml`、驱动 `pact-ref-spec::validate_entry`、失败非零退出；
+   `entry/` 23 例覆盖三态、URI profile、Identifier 文法与 RefBindings 策略。
+   resolve/invoke 用例待 adapter 假服务方案后扩展。
 6. ~~实现 OIDC（JWT/JWKS）验证器。~~ 已完成（2026-10-31）：`ref-auth` 的
    `OidcAuthenticator` + `JwksSource`，`refd` 的 `[auth.oidc]` 与
    `FileJwksSource`/`HttpJwksSource`；算法白名单、`iss`/`aud`/`exp`/`nbf`、未知 `kid`

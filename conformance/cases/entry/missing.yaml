@@ -1,0 +1,11 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/missing
+spec:
+  type: design
+  reference:
+    state: missing
+expect:
+  outcome: error
+  error: ThingRefMissing
+  reason: Missing

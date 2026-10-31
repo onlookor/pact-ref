@@ -1,0 +1,11 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/scheme-normalized-to-lowercase
+spec:
+  type: design
+  reference:
+    state: value
+    value: HTTPS://example.com/a
+expect:
+  outcome: ok
+  reference: https://example.com/a

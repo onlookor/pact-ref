@@ -1,0 +1,12 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/control-character
+spec:
+  type: design
+  reference:
+    state: value
+    value: "https://example.com/a\nb"
+expect:
+  outcome: error
+  error: InvalidThingRef
+  reason: ControlCharacter

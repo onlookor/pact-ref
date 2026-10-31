@@ -1,0 +1,11 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/ssh-username-is-not-userinfo
+spec:
+  type: design
+  reference:
+    state: value
+    value: git+ssh://git@example.com/org/repo@v1.2.3
+expect:
+  outcome: ok
+  reference: git+ssh://git@example.com/org/repo@v1.2.3

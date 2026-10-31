@@ -1,0 +1,12 @@
+apiVersion: conformance.pact-ref/v1
+kind: EntryCase
+name: entry/identifier-outside-grammar
+spec:
+  type: design
+  reference:
+    state: value
+    value: foo bar
+expect:
+  outcome: error
+  error: InvalidThingRef
+  reason: InvalidIdentifier
