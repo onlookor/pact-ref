@@ -784,6 +784,8 @@ spec:
       audience: pact-ref
       scopes: ["query:read"]
     timeoutMs: 5000
+    failure:
+      upstream: "502"
   reference:
     schemes: ["mcp", "file"]
     mutableAllowed: false

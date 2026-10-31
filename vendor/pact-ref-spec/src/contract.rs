@@ -472,6 +472,13 @@ fn validate_capability(
         }
     }
     if capability.side_effect == SideEffect::Mutating {
+        // FR37 / 治理 §13.8.2 `mcp-mutating` 字段集：写操作必须可幂等、输入契约可钉版、
+        // 声明物化策略与目标 audience，并给出可解释的失败分类。
+        if capability.tool.input_schema_digest.is_none() {
+            return Err(SpecError::InvalidContract(
+                "mutating capability requires tool.inputSchemaDigest".to_owned(),
+            ));
+        }
         let idempotency = capability.idempotency.as_ref().ok_or_else(|| {
             SpecError::InvalidContract(
                 "mutating capability requires spec.capability.idempotency".to_owned(),
@@ -487,9 +494,25 @@ fn validate_capability(
                 "mutating capability requires spec.capability.result".to_owned(),
             )
         })?;
-        if result.materialization != Materialization::Required {
+        if result.materialization == Materialization::Forbidden {
             return Err(SpecError::InvalidContract(
-                "mutating capability requires result.materialization=required".to_owned(),
+                "mutating capability requires result.materialization=required or optional"
+                    .to_owned(),
+            ));
+        }
+        let audience = capability
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.audience.as_deref())
+            .unwrap_or_default();
+        if audience.trim().is_empty() {
+            return Err(SpecError::InvalidContract(
+                "mutating capability requires auth.audience".to_owned(),
+            ));
+        }
+        if capability.failure.is_empty() {
+            return Err(SpecError::InvalidContract(
+                "mutating capability requires non-empty failure".to_owned(),
             ));
         }
     }
@@ -767,6 +790,90 @@ mod tests {
             .idempotency = None;
         let error = card.validate().expect_err("reject");
         assert!(matches!(error, SpecError::InvalidContract(_)));
+    }
+
+    #[test]
+    fn rejects_mutating_without_input_schema_digest() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .tool
+            .input_schema_digest = None;
+        let error = card.validate().expect_err("reject");
+        assert!(matches!(error, SpecError::InvalidContract(_)));
+    }
+
+    #[test]
+    fn rejects_mutating_without_result() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec.capability.as_mut().expect("capability").result = None;
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_mutating_with_forbidden_materialization() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .result
+            .as_mut()
+            .expect("result")
+            .materialization = super::Materialization::Forbidden;
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn accepts_mutating_with_optional_materialization() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .result
+            .as_mut()
+            .expect("result")
+            .materialization = super::Materialization::Optional;
+        card.validate().expect("valid mutating card");
+    }
+
+    #[test]
+    fn rejects_mutating_without_audience() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec.capability.as_mut().expect("capability").auth = Some(super::Auth {
+            scheme: None,
+            audience: None,
+            scopes: Vec::new(),
+            credential_source: None,
+        });
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_mutating_without_failure() {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .failure
+            .clear();
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
     }
 
     fn read_only_card() -> ContractCard {
