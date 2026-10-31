@@ -67,12 +67,27 @@ participants
 5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据；上游失败记 `status=failed`。
 6. `mcp-mutating` 不在本层实现，动态写阶段另行定案。
 
-## Reference Plane API（已实现）
+### 动态 mutate（写入，契约已定案、实现待做）
+
+1. 参与者确认 ContractCard 的 profile 为 `mcp-mutating`（`capability.sideEffect = mutating`），
+   且卡片具备 `tool.inputSchemaDigest`、`idempotency`、`result.materialization`、`auth.audience`
+   与非空 `failure`。
+2. 参与者带 `idempotencyKey` 调用 `POST /v1/mutate`；`reference` 严格等于
+   `<capability.server.id>/<capability.tool.name>`，`operation` 等于 `tool.name`。
+3. `refd` 先向 `[mutate].journal` 追加 `intent` 并 fsync，再经 `mcp` adapter 调用上游，
+   最后追加 `result` 并 fsync；同键同摘要重放结论，同键异摘要 `409`，结果不明 `409`。
+4. 成功结果与只读阶段一致地物化为内容寻址静态引用；参与者随后经 `/v1/resolve` 读取并
+   以正常 `seed`/`produce` 产生 witness token。
+5. 每次写 attempt 两条审计（`intent`/`result`）；`intent` 审计失败不触达上游。
+6. 不做自动 saga/补偿；撤销另立写卡片。实现见 `pact` 仓库 `docs/design.md` §9.20。
+
+## Reference Plane API（resolve/describe/invoke 已实现；mutate 契约已定案、实现待做）
 
 契约冻结在 `pact` 仓库的 `spec/ref/v1/reference-plane.openapi.yaml`，设计定案见
-`docs/thingref-governance.md` §13.6（resolve/describe）与 §13.7（只读 invoke）。
-首版含 resolve/describe/只读 invoke；`revoke` 与 `mcp-mutating` 随动态写阶段另行定案。
-`refd` 已按该契约实现（2026-10-31）。
+`docs/thingref-governance.md` §13.6（resolve/describe）、§13.7（只读 invoke）与
+§13.8（写入 mutate）。
+`refd` 已按该契约实现 resolve/describe/只读 invoke（2026-10-31）；`revoke` 与
+`mcp-mutating` 已定案、实现待做。
 
 ```text
 POST /v1/resolve
@@ -87,6 +102,10 @@ POST /v1/invoke
   { domain, type, reference, operation, idempotencyKey, input? }
   -> 200 { status: "succeeded", resultRef, resultDigest }   # 仅只读能力
 
+POST /v1/mutate                # 契约已定案、实现待做
+  { domain, type, reference, operation, idempotencyKey, input?, pactTokenId? }
+  -> 200 { status: "succeeded", resultRef?, resultDigest?, replayed }   # 仅 mutating 能力
+
 GET /healthz, /readyz         # 不带版本，security: []
 ```
 
@@ -94,10 +113,13 @@ GET /healthz, /readyz         # 不带版本，security: []
 
 - 主体来自验证后的凭据 `sub`；请求体不接受 `actor`。
 - v1 只接受 URI；`∅`/`null`/Identifier/裸路径 → `400 InvalidReference`。
-- 端点 scope（`ref:resolve` / `ref:describe` / `ref:invoke`）与对象 ACL 两层，并集允许、默认拒绝。
+- 端点 scope（`ref:resolve` / `ref:describe` / `ref:invoke` / `ref:mutate`）与对象 ACL 两层，并集允许、默认拒绝；只读授权不自动升级为写授权。
 - `intent=read` 返回 `handle` + `expiresAt`；`intent=verify` 只校验存在性与摘要，禁止返回 `handle`。
 - `invoke` 只接受 `capability.sideEffect = read-only`；`mutating` 一律 `403`；上游失败统一
   `502 UpstreamFailure`，不重试、不轮询。
+- `mutate` 只接受 `mutating` 能力，先写幂等台账 `intent` 再触达上游；同键同摘要重放、
+  同键异摘要 `409 IdempotencyConflict`、结果不明 `409 IdempotencyInDoubt`、满额
+  `503 JournalFull`、台账不可用 `500 JournalUnavailable`。
 - `describe` 不透出 `metadata.owner|labels|description`、`parties`、`capability.server`、
   `capability.auth.credentialSource`、`resolution.endpoint`。
 - 错误统一信封 `{code, message, traceId, retryable, detail?}`；401 与 403 严格区分。
@@ -156,12 +178,17 @@ timeout_ms = 10000             # 上限 30000
 bearer_token_env = "TOOLS_TOKEN"  # 可选；设置则必须非空，否则拒绝启动
 allow_plaintext = false        # 仅回环主机可设 true
 
+# 动态写调用（mcp-mutating）；存在写能力 profile 时 journal 必需
+# [mutate]
+# journal = "mutate.jsonl"     # append-only，单写者，逐条 fsync
+# max_entries = 10000          # 缺省 10000，1..=1000000，满额 503 JournalFull
+
 [[acl]]
 principal = "alice"
 domains = ["build"]
 types = ["artifact"]
 schemes = ["file"]
-operations = ["resolve:read", "resolve:verify", "describe", "invoke"]
+operations = ["resolve:read", "resolve:verify", "describe", "invoke", "mutate"]
 
 [[profiles]]
 domain = "build"
@@ -209,7 +236,8 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
    `git`/`oci` 仍待实现。
 4. ~~实现 `mcp-read` profile 与结果物化。~~ 已完成（2026-10-31）：`POST /v1/invoke`、
    只读闸门、引用归属校验、`mcp` adapter 的 JSON-RPC `tools/call`、内容寻址物化与
-   启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。`mcp-mutating` 仍待动态写阶段。
+   启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。`mcp-mutating` 契约已定案
+   （2026-10-31，FR37/D53），实现待做。
 5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
 6. ~~实现 OIDC（JWT/JWKS）验证器。~~ 已完成（2026-10-31）：`ref-auth` 的
    `OidcAuthenticator` + `JwksSource`，`refd` 的 `[auth.oidc]` 与
