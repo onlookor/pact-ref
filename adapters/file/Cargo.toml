@@ -7,3 +7,4 @@ description = "File scheme adapter skeleton"
 
 [dependencies]
 pact-ref-core.workspace = true
+sha2.workspace = true

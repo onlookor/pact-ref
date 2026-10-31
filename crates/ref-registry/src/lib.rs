@@ -58,7 +58,21 @@ mod tests {
         ContractDescriptor {
             contract_id: "demo/artifact".to_owned(),
             version: "1".to_owned(),
+            status: None,
             media_type: "application/octet-stream".to_owned(),
+            artifact: None,
+            capability: None,
+            auth: None,
+            reference: pact_ref_core::ReferenceDescriptor {
+                schemes: vec!["https".to_owned()],
+                uri_pattern: None,
+                mutable_allowed: None,
+                pinning: None,
+            },
+            lifecycle: None,
+            failure: std::collections::BTreeMap::new(),
+            verification: None,
+            consumer_scope: None,
         }
     }
 

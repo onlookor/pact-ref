@@ -8,7 +8,17 @@ description = "PACT 物引治理平面服务二进制"
 [dependencies]
 pact-ref-core.workspace = true
 pact-ref-resolver.workspace = true
-pact-ref-invoker.workspace = true
-pact-ref-registry.workspace = true
 pact-ref-auth.workspace = true
 pact-ref-audit.workspace = true
+pact-ref-adapter-file.workspace = true
+pact-ref-adapter-http.workspace = true
+axum.workspace = true
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

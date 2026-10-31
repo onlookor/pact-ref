@@ -85,7 +85,7 @@ impl Resolver for StaticResolver {
             media_type: "application/octet-stream".to_owned(),
             digest: None,
             expires_at: None,
-            handle: handle.clone(),
+            handle: Some(handle.clone()),
         })
     }
 }
@@ -102,6 +102,8 @@ mod tests {
             reference: ReferenceForm::classify(Some(reference)).expect("reference"),
             actor: "tester".to_owned(),
             intent: ResolveIntent::Read,
+            expected_digest: None,
+            pact_token_id: None,
         }
     }
 
@@ -112,7 +114,7 @@ mod tests {
         let mut registry = ResolverRegistry::new();
         registry.register(Box::new(adapter));
         let resolution = registry.resolve(&request("mem://a")).expect("resolve");
-        assert_eq!(resolution.handle, "handle-a");
+        assert_eq!(resolution.handle.as_deref(), Some("handle-a"));
     }
 
     #[test]

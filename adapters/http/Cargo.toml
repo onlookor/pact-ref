@@ -7,3 +7,4 @@ description = "HTTPS scheme adapter skeleton"
 
 [dependencies]
 pact-ref-core.workspace = true
+ureq.workspace = true

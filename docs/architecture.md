@@ -60,10 +60,11 @@ participants
 4. 需要长期依赖时，参与者把结果物化为静态 ref，再产生新 token。
 5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据。
 
-## Reference Plane API（已定案，实现待做）
+## Reference Plane API（已实现）
 
 契约冻结在 `pact` 仓库的 `spec/ref/v1/reference-plane.openapi.yaml`，设计定案见
 `docs/thingref-governance.md` §13.6。首版只含 resolve/describe；invoke/revoke 随动态阶段另行定案。
+`refd` 已按该契约实现（2026-10-31）。
 
 ```text
 POST /v1/resolve
@@ -88,6 +89,55 @@ GET /healthz, /readyz         # 不带版本，security: []
 - 错误统一信封 `{code, message, traceId, retryable, detail?}`；401 与 403 严格区分。
 - 每条已认证请求一条审计事件，审计失败 fail-closed（`500 AuditUnavailable`）。
 
+### `refd` 配置与运行
+
+`refd` 只从显式配置启动：命令行第一个参数或环境变量 `REFD_CONFIG` 指向 `refd.toml`。
+启动时整体校验配置与全部 ContractCard，任何一项不合规则拒绝启动（fail-closed）。
+
+```toml
+[server]
+bind = "127.0.0.1:8080"        # v1 无 TLS，只接受回环地址
+allow_plaintext = true         # 回环明文必须显式开启
+
+[auth]
+mode = "static"                # deny（默认）| static；oidc 启动即失败
+
+[auth.static]
+allow = true
+token = "changeme"
+subject = "alice"
+scopes = ["ref:resolve", "ref:describe"]
+
+[audit]
+path = "audit.jsonl"           # append-only；相对配置文件目录
+fail_open = false              # 默认 fail-closed
+
+[adapter.file]
+root = "artifacts"             # 所有 file:// 目标必须 canonicalize 到该目录下
+
+[adapter.https]
+allowed_hosts = ["artifacts.example.com"]
+timeout_ms = 10000
+
+[[acl]]
+principal = "alice"
+domains = ["build"]
+types = ["artifact"]
+schemes = ["file"]
+operations = ["resolve:read", "resolve:verify", "describe"]
+
+[[profiles]]
+domain = "build"
+type = "artifact"
+card = "cards/build-artifact.yaml"
+```
+
+```sh
+REFD_CONFIG=deploy/refd.toml cargo run -p pact-refd
+```
+
+`/readyz` 只检查审计 sink 可写；`[auth] mode = oidc` 尚未实现，启动即报错而不是降级为匿名。
+
 ## 与 PACT 的边界
 
 - PACT daemon 永不调用 `refd`。
@@ -97,13 +147,16 @@ GET /healthz, /readyz         # 不带版本，security: []
 
 ## 引导阶段
 
-当前 crate 只定义纯类型、trait 和占位 adapter；CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
+当前 crate 已包含可运行的 `refd` 与 `file`/`https` adapter；其余 adapter 仍是占位。
+CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
 规范层（`pact-ref-spec` 与 `spec/ref/v1/`）已在 `pact` 仓库落地，本仓库以 vendored 快照消费。
 下一步：
 
 1. ~~在 `pact` 仓库抽取 `pact-ref-spec` 与 `spec/ref/v1/`，并把本仓库切换到发布版本。~~
    已完成抽取与快照消费；待规范发布注册表后切换为纯版本依赖。
-2. 实现 `refd` 的 `/v1/resolve` 与 `/v1/describe`（身份 + scope/ACL + 审计 fail-closed；契约冻结在 `pact` 仓库 `spec/ref/v1/reference-plane.openapi.yaml`）。
-3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。
-4. 实现 mcp-read profile 与结果物化。
-5. 加入一致性测试与审计边车。
+2. ~~实现 `refd` 的 `/v1/resolve` 与 `/v1/describe`。~~ 已完成（2026-10-31）：`deny`/`static` 认证、scope + 对象 ACL、审计 fail-closed、传输约束与错误信封；14 项集成测试覆盖主要分支。
+3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。`file` 与 `https` 已完成；
+   `git`/`oci` 仍待实现。
+4. 实现 `mcp-read` profile 与结果物化。
+5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
+6. 实现 OIDC（JWT/JWKS）验证器；当前 `[auth] mode = oidc` 启动即失败。

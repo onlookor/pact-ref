@@ -50,7 +50,7 @@ mod tests {
                 media_type: "application/octet-stream".to_owned(),
                 digest: None,
                 expires_at: None,
-                handle: request.reference.as_str().unwrap_or("∅").to_owned(),
+                handle: Some(request.reference.as_str().unwrap_or("∅").to_owned()),
             })
         }
     }
@@ -79,6 +79,8 @@ mod tests {
             reference: ReferenceForm::classify(Some("https://example.com/a")).expect("reference"),
             actor: "alice".to_owned(),
             intent: pact_ref_core::ResolveIntent::Read,
+            expected_digest: None,
+            pact_token_id: None,
         }
     }
 
@@ -97,7 +99,7 @@ mod tests {
     fn delegates_resolve_and_invoke() {
         let client = Client::new(FakeResolver, FakeInvoker);
         let resolution = client.resolve(&resolve_request()).expect("resolve");
-        assert_eq!(resolution.handle, "https://example.com/a");
+        assert_eq!(resolution.handle.as_deref(), Some("https://example.com/a"));
         let invocation = client.invoke(&invoke_request()).expect("invoke");
         assert_eq!(invocation.status, InvocationStatus::Succeeded);
         assert_eq!(
