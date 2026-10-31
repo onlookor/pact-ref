@@ -46,7 +46,7 @@ participants
 ### 静态 resolve
 
 1. 参与者从 PACT token / Counter / Archive 获得 `ThingRef`。
-2. 参与者调用 `resolve(domain, type, ref, actor, intent)`。
+2. 参与者调用 `resolve(domain, type, ref, intent)`（主体来自凭据，不在请求体）。
 3. `refd` 按 `(domain, type, scheme)` 选择 profile 与 adapter。
 4. adapter 返回不透明 handle、digest、media type、contract、expires_at。
 5. 参与者验证并消费制品。
@@ -60,25 +60,33 @@ participants
 4. 需要长期依赖时，参与者把结果物化为静态 ref，再产生新 token。
 5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据。
 
-## Reference Plane API（规划）
+## Reference Plane API（已定案，实现待做）
+
+契约冻结在 `pact` 仓库的 `spec/ref/v1/reference-plane.openapi.yaml`，设计定案见
+`docs/thingref-governance.md` §13.6。首版只含 resolve/describe；invoke/revoke 随动态阶段另行定案。
 
 ```text
-resolve(domain, type, ref, actor, intent) -> {
-  handle | bytes | stream,
-  digest, media_type,
-  contract_id, version,
-  expires_at
-}
+POST /v1/resolve
+  { domain, type, reference, intent, expectedDigest?, pactTokenId? }
+  -> 200 { contractId, version, mediaType, digest?, expiresAt?, handle? }
 
-invoke(domain, type, ref, actor, operation, input, idempotency_key) -> {
-  status,
-  result_ref?, result_digest?,
-  error?
-}
+POST /v1/describe
+  { domain, type, reference }
+  -> 200 ContractDescriptor   # 白名单投影，非完整 ContractCard
 
-describe(ref) -> ContractCard
-revoke(ref, actor, reason) -> {}
+GET /healthz, /readyz         # 不带版本，security: []
 ```
+
+要点：
+
+- 主体来自验证后的凭据 `sub`；请求体不接受 `actor`。
+- v1 只接受 URI；`∅`/`null`/Identifier/裸路径 → `400 InvalidReference`。
+- 端点 scope（`ref:resolve` / `ref:describe`）与对象 ACL 两层，并集允许、默认拒绝。
+- `intent=read` 返回 `handle` + `expiresAt`；`intent=verify` 只校验存在性与摘要，禁止返回 `handle`。
+- `describe` 不透出 `metadata.owner|labels|description`、`parties`、`capability.server`、
+  `capability.auth.credentialSource`、`resolution.endpoint`。
+- 错误统一信封 `{code, message, traceId, retryable, detail?}`；401 与 403 严格区分。
+- 每条已认证请求一条审计事件，审计失败 fail-closed（`500 AuditUnavailable`）。
 
 ## 与 PACT 的边界
 
@@ -95,7 +103,7 @@ revoke(ref, actor, reason) -> {}
 
 1. ~~在 `pact` 仓库抽取 `pact-ref-spec` 与 `spec/ref/v1/`，并把本仓库切换到发布版本。~~
    已完成抽取与快照消费；待规范发布注册表后切换为纯版本依赖。
-2. 实现 `refd` 的 resolve/describe 端点。
+2. 实现 `refd` 的 `/v1/resolve` 与 `/v1/describe`（身份 + scope/ACL + 审计 fail-closed；契约冻结在 `pact` 仓库 `spec/ref/v1/reference-plane.openapi.yaml`）。
 3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。
 4. 实现 mcp-read profile 与结果物化。
 5. 加入一致性测试与审计边车。
