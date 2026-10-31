@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +19,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use tower::ServiceExt;
 
 use pact_ref_core::{AuditError, AuditEvent, AuditSink};
+use pact_refd::journal::{request_digest, Journal, KeyScope, Lookup};
 use pact_refd::{router, AppState, Config};
 
 const CARD: &str = r#"
@@ -848,6 +849,9 @@ card = "card.yaml"
 
 {mcp_section}
 {materialize_section}
+
+[mutate]
+journal = "mutate.jsonl"
 "#
     )
 }
@@ -1140,5 +1144,600 @@ fn mcp_endpoint_plaintext_requires_explicit_loopback() {
     let config = Config::from_toml(&tls, &dir).expect("config");
     config.validate().expect("https endpoint is allowed");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// 动态写（FR37 / D53）：mutate → 台账 → 上游 → 物化 → resolve 闭环
+// ---------------------------------------------------------------------------
+
+/// 可计数的假 MCP 服务端：非阻塞 accept，统计实际收到的 `tools/call` 次数。
+struct CountingMcpServer {
+    endpoint: String,
+    calls: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CountingMcpServer {
+    fn start(body: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake mcp");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let address = listener.local_addr().expect("addr");
+        let calls = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls_bg = Arc::clone(&calls);
+        let stop_bg = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_bg.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let request = read_http_request(&mut stream);
+                        assert!(request.contains("\"tools/call\""), "unexpected request");
+                        calls_bg.fetch_add(1, Ordering::SeqCst);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            endpoint: format!("http://{address}"),
+            calls,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for CountingMcpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// 启动前预置台账记录，用于构造 in-doubt 与满额场景。
+enum Preload {
+    None,
+    IntentOnly {
+        key: String,
+        input: serde_json::Value,
+    },
+    Terminal {
+        key: String,
+        input: serde_json::Value,
+    },
+}
+
+struct MutateFixture {
+    dir: PathBuf,
+    reference: String,
+    state: Arc<AppState>,
+    server: CountingMcpServer,
+}
+
+impl MutateFixture {
+    fn new(
+        scopes: &[&str],
+        operations: &[&str],
+        side_effect: &str,
+        response: &'static str,
+    ) -> Self {
+        Self::build(
+            scopes,
+            operations,
+            side_effect,
+            response,
+            1000,
+            None,
+            Preload::None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        scopes: &[&str],
+        operations: &[&str],
+        side_effect: &str,
+        response: &'static str,
+        max_entries: usize,
+        audit: Option<Arc<dyn AuditSink + Send + Sync>>,
+        preload: Preload,
+    ) -> Self {
+        let server = CountingMcpServer::start(response);
+        let address = server
+            .endpoint
+            .strip_prefix("http://")
+            .expect("http endpoint")
+            .to_owned();
+        let server_id = format!("mcp://{address}");
+        let reference = format!("{server_id}/query.run");
+
+        let unique = format!(
+            "refd-mutate-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(dir.join("materialized")).expect("materialize dir");
+        std::fs::write(dir.join("card.yaml"), mcp_card(&server_id, side_effect)).expect("card");
+
+        if !matches!(preload, Preload::None) {
+            let journal =
+                Journal::open(&dir.join("mutate.jsonl"), max_entries).expect("seed journal");
+            let (key, input, terminal) = match preload {
+                Preload::None => unreachable!(),
+                Preload::IntentOnly { key, input } => (key, input, false),
+                Preload::Terminal { key, input } => (key, input, true),
+            };
+            let digest = request_digest("query", "answer", &reference, "query.run", &input);
+            let scope = KeyScope {
+                actor: "alice".to_owned(),
+                domain: "query".to_owned(),
+                type_name: "answer".to_owned(),
+                reference: reference.clone(),
+                operation: "query.run".to_owned(),
+                idempotency_key: key,
+            };
+            journal.begin(&scope, &digest, "seed").expect("seed intent");
+            if terminal {
+                journal
+                    .finish(&scope, &digest, "succeeded", None, None, "seed")
+                    .expect("seed result");
+            }
+        }
+
+        let config = format!(
+            r#"
+[server]
+bind = "127.0.0.1:8080"
+allow_plaintext = true
+
+[auth]
+mode = "static"
+
+[auth.static]
+allow = true
+token = "s3cret"
+subject = "alice"
+scopes = [{scopes}]
+
+[audit]
+path = "audit.jsonl"
+
+[adapter.file]
+root = "."
+
+[[acl]]
+principal = "alice"
+domains = ["query"]
+types = ["answer"]
+schemes = ["mcp", "file"]
+operations = [{operations}]
+
+[[profiles]]
+domain = "query"
+type = "answer"
+card = "card.yaml"
+
+[[mcp_servers]]
+id = "{server_id}"
+endpoint = "{server_endpoint}"
+allow_plaintext = true
+timeout_ms = 5000
+
+[materialize]
+dir = "materialized"
+
+[mutate]
+journal = "mutate.jsonl"
+max_entries = {max_entries}
+"#,
+            scopes = quoted(scopes),
+            operations = quoted(operations),
+            server_endpoint = server.endpoint,
+        );
+        let config = Config::from_toml(&config, &dir).expect("config");
+        let mut state = AppState::from_config(config).expect("state");
+        if let Some(audit) = audit {
+            state.audit = audit;
+        }
+        Self {
+            dir,
+            reference,
+            state: Arc::new(state),
+            server,
+        }
+    }
+
+    fn router(&self) -> Router {
+        router(Arc::clone(&self.state))
+    }
+
+    fn body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "domain": "query",
+            "type": "answer",
+            "reference": self.reference,
+            "operation": "query.run",
+            "idempotencyKey": "idem-1",
+            "input": { "q": "life" },
+        })
+    }
+
+    fn audit_events(&self) -> Vec<serde_json::Value> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("audit.jsonl")) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("audit json"))
+            .collect()
+    }
+
+    fn journal_lookup(&self) -> Lookup {
+        let digest = request_digest(
+            "query",
+            "answer",
+            &self.reference,
+            "query.run",
+            &serde_json::json!({ "q": "life" }),
+        );
+        let scope = KeyScope {
+            actor: "alice".to_owned(),
+            domain: "query".to_owned(),
+            type_name: "answer".to_owned(),
+            reference: self.reference.clone(),
+            operation: "query.run".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+        };
+        Journal::open(&self.dir.join("mutate.jsonl"), 1000)
+            .expect("journal")
+            .lookup(&scope, &digest)
+            .expect("lookup")
+    }
+}
+
+impl Drop for MutateFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// 只在第 `fail_at` 次写入失败，其余成功；用于「result 审计失败」场景。
+struct FailNthSink {
+    fail_at: u32,
+    calls: AtomicU32,
+}
+
+impl AuditSink for FailNthSink {
+    fn record(&self, _event: &AuditEvent) -> Result<(), AuditError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.fail_at {
+            Err(AuditError::new("injected audit failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn mutate_materializes_result_and_resolves_it() {
+    let fixture = MutateFixture::new(
+        &["ref:mutate", "ref:resolve"],
+        &["mutate", "resolve:read"],
+        "mutating",
+        MCP_OK_RESPONSE,
+    );
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "succeeded");
+    assert_eq!(json["replayed"], false);
+    let result_ref = json["resultRef"].as_str().expect("resultRef").to_owned();
+    let result_digest = json["resultDigest"]
+        .as_str()
+        .expect("resultDigest")
+        .to_owned();
+    assert!(result_ref.starts_with("file://"));
+    assert!(result_digest.starts_with("sha256:"));
+    assert_eq!(fixture.server.calls(), 1);
+
+    match fixture.journal_lookup() {
+        Lookup::Replay(record) => {
+            assert!(record.succeeded());
+            assert_eq!(record.result_ref.as_deref(), Some(result_ref.as_str()));
+            assert_eq!(
+                record.result_digest.as_deref(),
+                Some(result_digest.as_str())
+            );
+        }
+        other => panic!("expected replay, got {other:?}"),
+    }
+
+    // 写结论物化为静态引用后，可经只读 resolve 取回，形成闭环。
+    let (status, _, body) = send(
+        fixture.router(),
+        post(
+            "/v1/resolve",
+            serde_json::json!({
+                "domain": "query",
+                "type": "answer",
+                "reference": result_ref,
+                "intent": "read",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve failed: {:?}", body);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["digest"], result_digest);
+
+    // 两阶段审计：intent（requestDigest）与 result（resultDigest）。
+    let events = fixture.audit_events();
+    let mutate_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["operation"] == "mutate")
+        .collect();
+    assert_eq!(mutate_events.len(), 2, "events: {events:?}");
+    assert_eq!(mutate_events[0]["status"], "ok");
+    assert!(mutate_events[0]["requestDigest"]
+        .as_str()
+        .expect("request digest")
+        .starts_with("sha256:"));
+    assert!(mutate_events[0].get("resultDigest").is_none());
+    assert_eq!(mutate_events[1]["status"], "ok");
+    assert_eq!(mutate_events[1]["resultDigest"], result_digest);
+}
+
+#[tokio::test]
+async fn mutate_replays_same_key_without_calling_upstream() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["mutate"], "mutating", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::OK);
+    let first: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(first["replayed"], false);
+
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::OK);
+    let second: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(second["replayed"], true);
+    assert_eq!(second["status"], "succeeded");
+    assert_eq!(second["resultRef"], first["resultRef"]);
+    assert_eq!(second["resultDigest"], first["resultDigest"]);
+
+    assert_eq!(fixture.server.calls(), 1, "replay must not reach upstream");
+}
+
+#[tokio::test]
+async fn mutate_same_key_different_digest_conflicts() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["mutate"], "mutating", MCP_OK_RESPONSE);
+    let (status, _, _) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut conflicting = fixture.body();
+    conflicting["input"] = serde_json::json!({ "q": "other" });
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", conflicting)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "IdempotencyConflict");
+    assert_eq!(fixture.server.calls(), 1);
+}
+
+#[tokio::test]
+async fn mutate_in_doubt_is_rejected_without_calling_upstream() {
+    let fixture = MutateFixture::build(
+        &["ref:mutate"],
+        &["mutate"],
+        "mutating",
+        MCP_OK_RESPONSE,
+        1000,
+        None,
+        Preload::IntentOnly {
+            key: "idem-1".to_owned(),
+            input: serde_json::json!({ "q": "life" }),
+        },
+    );
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "IdempotencyInDoubt");
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_requires_mutate_scope() {
+    let fixture = MutateFixture::new(&["ref:invoke"], &["mutate"], "mutating", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "Forbidden");
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_requires_object_acl_mutate_operation() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["invoke"], "mutating", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "Forbidden");
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_rejects_read_only_capability() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["mutate"], "read-only", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "Forbidden");
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_rejects_reference_or_operation_mismatch() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["mutate"], "mutating", MCP_OK_RESPONSE);
+
+    let mut wrong_operation = fixture.body();
+    wrong_operation["operation"] = serde_json::json!("other.run");
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", wrong_operation)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "InvalidReference");
+
+    let mut wrong_reference = fixture.body();
+    wrong_reference["reference"] = serde_json::json!("mcp://other.example/query.run");
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", wrong_reference)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "InvalidReference");
+
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_intent_audit_failure_does_not_reach_upstream() {
+    let fixture = MutateFixture::build(
+        &["ref:mutate"],
+        &["mutate"],
+        "mutating",
+        MCP_OK_RESPONSE,
+        1000,
+        Some(Arc::new(FailingSink)),
+        Preload::None,
+    );
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "AuditUnavailable");
+    assert_eq!(fixture.server.calls(), 0, "intent audit must gate upstream");
+    assert_eq!(fixture.journal_lookup(), Lookup::InDoubt);
+}
+
+#[tokio::test]
+async fn mutate_result_audit_failure_recovers_by_replay() {
+    let fixture = MutateFixture::build(
+        &["ref:mutate"],
+        &["mutate"],
+        "mutating",
+        MCP_OK_RESPONSE,
+        1000,
+        Some(Arc::new(FailNthSink {
+            fail_at: 2,
+            calls: AtomicU32::new(0),
+        })),
+        Preload::None,
+    );
+    // 第 1 次写审计成功、第 2 次（result）失败：响应 500，但台账已有结论。
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "AuditUnavailable");
+    assert_eq!(fixture.server.calls(), 1);
+
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "replay: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "succeeded");
+    assert_eq!(json["replayed"], true);
+    assert_eq!(fixture.server.calls(), 1);
+}
+
+#[tokio::test]
+async fn mutate_journal_full_is_unavailable() {
+    let fixture = MutateFixture::build(
+        &["ref:mutate"],
+        &["mutate"],
+        "mutating",
+        MCP_OK_RESPONSE,
+        2,
+        None,
+        Preload::Terminal {
+            key: "seed-1".to_owned(),
+            input: serde_json::json!({ "seed": true }),
+        },
+    );
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "JournalFull");
+    assert_eq!(fixture.server.calls(), 0);
+}
+
+#[tokio::test]
+async fn mutate_upstream_failure_is_bad_gateway_and_replays() {
+    let fixture = MutateFixture::new(&["ref:mutate"], &["mutate"], "mutating", MCP_ERROR_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "UpstreamFailure");
+    assert_eq!(fixture.server.calls(), 1);
+
+    let (status, _, body) = send(fixture.router(), post("/v1/mutate", fixture.body())).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "UpstreamFailure");
+    assert_eq!(json["detail"]["replayed"], true);
+    assert_eq!(fixture.server.calls(), 1);
+}
+
+#[test]
+fn mutating_profile_requires_journal() {
+    let (endpoint, server) = fake_mcp_server(MCP_OK_RESPONSE);
+    let address = endpoint.strip_prefix("http://").expect("http");
+    let server_id = format!("mcp://{address}");
+    let dir = std::env::temp_dir().join(format!(
+        "refd-mutate-nojournal-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join("materialized")).expect("dir");
+    std::fs::write(dir.join("card.yaml"), mcp_card(&server_id, "mutating")).expect("card");
+
+    let config = mcp_config(&server_id, &endpoint, true, true)
+        .replace("[mutate]\njournal = \"mutate.jsonl\"\n", "");
+    let config = Config::from_toml(&config, &dir).expect("config");
+    let error = match AppState::from_config(config) {
+        Ok(_) => panic!("state must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("[mutate].journal"),
+        "unexpected error: {error}"
+    );
+
+    drop(server);
     let _ = std::fs::remove_dir_all(&dir);
 }

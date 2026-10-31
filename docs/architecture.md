@@ -67,7 +67,7 @@ participants
 5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据；上游失败记 `status=failed`。
 6. `mcp-mutating` 不在本层实现，动态写阶段另行定案。
 
-### 动态 mutate（写入，契约已定案、实现待做）
+### 动态 mutate（写入，已实现）
 
 1. 参与者确认 ContractCard 的 profile 为 `mcp-mutating`（`capability.sideEffect = mutating`），
    且卡片具备 `tool.inputSchemaDigest`、`idempotency`、`result.materialization`、`auth.audience`
@@ -81,13 +81,13 @@ participants
 5. 每次写 attempt 两条审计（`intent`/`result`）；`intent` 审计失败不触达上游。
 6. 不做自动 saga/补偿；撤销另立写卡片。实现见 `pact` 仓库 `docs/design.md` §9.20。
 
-## Reference Plane API（resolve/describe/invoke 已实现；mutate 契约已定案、实现待做）
+## Reference Plane API（resolve/describe/invoke/mutate 均已实现）
 
 契约冻结在 `pact` 仓库的 `spec/ref/v1/reference-plane.openapi.yaml`，设计定案见
 `docs/thingref-governance.md` §13.6（resolve/describe）、§13.7（只读 invoke）与
 §13.8（写入 mutate）。
-`refd` 已按该契约实现 resolve/describe/只读 invoke（2026-10-31）；`revoke` 与
-`mcp-mutating` 已定案、实现待做。
+`refd` 已按该契约实现 resolve/describe/只读 invoke/写入 mutate（2026-10-31）；
+`revoke` 仍未实现。
 
 ```text
 POST /v1/resolve
@@ -102,7 +102,7 @@ POST /v1/invoke
   { domain, type, reference, operation, idempotencyKey, input? }
   -> 200 { status: "succeeded", resultRef, resultDigest }   # 仅只读能力
 
-POST /v1/mutate                # 契约已定案、实现待做
+POST /v1/mutate                # 仅 mutating 能力；经幂等台账
   { domain, type, reference, operation, idempotencyKey, input?, pactTokenId? }
   -> 200 { status: "succeeded", resultRef?, resultDigest?, replayed }   # 仅 mutating 能力
 

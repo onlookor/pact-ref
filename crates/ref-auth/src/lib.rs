@@ -11,6 +11,8 @@ use pact_ref_core::{Authorizer, ReferenceError, ReferenceForm, ResolveIntent};
 pub const SCOPE_RESOLVE: &str = "ref:resolve";
 pub const SCOPE_DESCRIBE: &str = "ref:describe";
 pub const SCOPE_INVOKE: &str = "ref:invoke";
+/// 动态写端点 scope；与 `ref:invoke` 互不蕴含（D53）。
+pub const SCOPE_MUTATE: &str = "ref:mutate";
 
 /// 已认证主体。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +210,8 @@ impl Authorizer for DenyAllAuthorizer {
 mod tests {
     use super::{
         glob_match, Acl, AclRule, AllowAllAuthorizer, Authenticator, DenyAllAuthorizer,
-        DenyAuthenticator, Identity, StaticTokenAuthenticator, SCOPE_DESCRIBE, SCOPE_RESOLVE,
+        DenyAuthenticator, Identity, StaticTokenAuthenticator, SCOPE_DESCRIBE, SCOPE_MUTATE,
+        SCOPE_RESOLVE,
     };
     use pact_ref_core::{Authorizer, ReferenceError, ReferenceForm, ResolveIntent};
 
@@ -288,6 +291,14 @@ mod tests {
         let identity = Identity::new("ops", vec!["*".to_owned()]);
         assert!(identity.has_scope(SCOPE_RESOLVE));
         assert!(identity.has_scope("anything"));
+    }
+
+    #[test]
+    fn mutate_scope_is_separate_from_invoke() {
+        assert_eq!(SCOPE_MUTATE, "ref:mutate");
+        let identity = Identity::new("writer", vec![SCOPE_MUTATE.to_owned()]);
+        assert!(identity.has_scope(SCOPE_MUTATE));
+        assert!(!identity.has_scope(super::SCOPE_INVOKE));
     }
 
     #[test]

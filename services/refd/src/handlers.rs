@@ -15,13 +15,14 @@ use serde::{Deserialize, Serialize};
 
 use pact_ref_auth::Identity;
 use pact_ref_core::{
-    AuditEvent, Invocation, InvocationStatus, InvokeRequest, ReferenceError, ReferenceForm,
-    Resolution, ResolveIntent, ResolveRequest, SideEffect,
+    AuditEvent, Invocation, InvocationStatus, InvokeRequest, Materialization, MutateRequest,
+    ReferenceError, ReferenceForm, Resolution, ResolveIntent, ResolveRequest, SideEffect,
 };
 use pact_ref_invoker::InvokerRegistry;
 use pact_ref_resolver::ResolverRegistry;
 
 use crate::config::validate_selector;
+use crate::journal::{self, JournalError, KeyScope, Lookup, MutationRecord};
 use crate::state::AppState;
 use crate::time::{new_trace_id, now_plus, rfc3339};
 
@@ -40,6 +41,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/resolve", any(resolve))
         .route("/v1/describe", any(describe))
         .route("/v1/invoke", any(invoke))
+        .route("/v1/mutate", any(mutate))
         .with_state(state)
 }
 
@@ -67,11 +69,16 @@ async fn invoke(State(state): State<Arc<AppState>>, request: Request) -> Respons
     business(state, request, Operation::Invoke).await
 }
 
+async fn mutate(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    business(state, request, Operation::Mutate).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Resolve,
     Describe,
     Invoke,
+    Mutate,
 }
 
 impl Operation {
@@ -80,6 +87,7 @@ impl Operation {
             Self::Resolve => pact_ref_auth::SCOPE_RESOLVE,
             Self::Describe => pact_ref_auth::SCOPE_DESCRIBE,
             Self::Invoke => pact_ref_auth::SCOPE_INVOKE,
+            Self::Mutate => pact_ref_auth::SCOPE_MUTATE,
         }
     }
 
@@ -88,6 +96,7 @@ impl Operation {
             Self::Resolve => "resolve",
             Self::Describe => "describe",
             Self::Invoke => "invoke",
+            Self::Mutate => "mutate",
         }
     }
 }
@@ -158,23 +167,13 @@ async fn business(state: Arc<AppState>, request: Request, operation: Operation) 
         }
     };
 
-    match state.audit.record(&context.event(status)) {
+    // `/v1/mutate` 在写 intent 后自行落两阶段审计，外层不再追加单条审计。
+    if context.suppress_final_audit {
+        return response;
+    }
+    match record_audit(&state, &context, status) {
         Ok(()) => response,
-        Err(error) => {
-            if state.audit_fail_open {
-                eprintln!("refd: audit sink failure (fail_open = true): {error}");
-                response
-            } else {
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Code::AUDIT_UNAVAILABLE,
-                    "audit sink unavailable",
-                    &trace_id,
-                    true,
-                    None,
-                )
-            }
-        }
+        Err(error) => error.into_response(&trace_id),
     }
 }
 
@@ -196,6 +195,7 @@ async fn run_business(
         Operation::Resolve => handle_resolve(state, identity, &bytes, context).await,
         Operation::Describe => handle_describe(state, identity, &bytes, context),
         Operation::Invoke => handle_invoke(state, identity, &bytes, context).await,
+        Operation::Mutate => handle_mutate(state, identity, &bytes, context).await,
     }
 }
 
@@ -431,6 +431,295 @@ async fn handle_invoke(
     Ok(json_response(StatusCode::OK, &context.trace_id, &body))
 }
 
+/// 动态写：先授权、后台账、再上游；每次 attempt 落 intent/result 两条审计。
+async fn handle_mutate(
+    state: &AppState,
+    identity: &Identity,
+    bytes: &[u8],
+    context: &mut AuditContext,
+) -> Result<Response, ApiError> {
+    let wire: MutateWire = parse_json(bytes)?;
+    validate_selector("domain", &wire.domain).map_err(|_| invalid_selector("domain"))?;
+    validate_selector("type", &wire.type_name).map_err(|_| invalid_selector("type"))?;
+    validate_selector("operation", &wire.operation).map_err(|_| invalid_selector("operation"))?;
+    validate_idempotency_key(&wire.idempotency_key)?;
+    let reference = parse_reference(&wire.reference)?;
+
+    context.reference = Some(wire.reference.clone());
+    context.domain = Some(wire.domain.clone());
+    context.type_name = Some(wire.type_name.clone());
+    context.operation = "mutate".to_owned();
+    if let Some(token_id) = &wire.pact_token_id {
+        validate_pact_token_id(token_id)?;
+        context.token_id = Some(token_id.clone());
+    }
+
+    let scheme = reference.scheme().unwrap_or_default();
+    if !state.acl.allows(
+        &identity.subject,
+        &wire.domain,
+        &wire.type_name,
+        scheme,
+        "mutate",
+    ) {
+        return Err(ApiError::forbidden("object ACL denied"));
+    }
+
+    let profile = state
+        .profile(&wire.domain, &wire.type_name)
+        .ok_or_else(ApiError::not_found)?;
+    if !profile.schemes.iter().any(|allowed| allowed == scheme) {
+        return Err(ApiError::invalid_reference(
+            "scheme is not allowed by the contract",
+        ));
+    }
+
+    let capability = profile
+        .card
+        .spec
+        .capability
+        .as_ref()
+        .ok_or_else(|| ApiError::invalid_reference("profile is not a capability"))?;
+    if capability.side_effect != SideEffect::Mutating {
+        return Err(ApiError::forbidden(
+            "only mutating capabilities can be mutated",
+        ));
+    }
+    // `mcp-mutating` 字段集在卡片加载时已校验；这里作为请求级纵深防御再确认一次。
+    let mutating_complete = capability.kind == "mcp-tool"
+        && !capability.server.id.is_empty()
+        && !capability.tool.name.trim().is_empty()
+        && capability.tool.input_schema_digest.is_some()
+        && capability.idempotency.as_ref().is_some_and(|idempotency| {
+            !idempotency.key.trim().is_empty() && !idempotency.semantics.trim().is_empty()
+        })
+        && capability.result.as_ref().is_some_and(|result| {
+            matches!(
+                result.materialization,
+                Materialization::Required | Materialization::Optional
+            )
+        })
+        && capability
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.audience.as_deref())
+            .is_some_and(|audience| !audience.trim().is_empty())
+        && !capability.failure.is_empty();
+    if !mutating_complete {
+        return Err(ApiError::forbidden(
+            "mutating profile is missing required fields",
+        ));
+    }
+    let expected_reference = format!("{}/{}", capability.server.id, capability.tool.name);
+    if wire.reference != expected_reference || wire.operation != capability.tool.name {
+        return Err(ApiError::invalid_reference(
+            "reference and operation must match the capability server and tool",
+        ));
+    }
+
+    context.contract_id = Some(profile.descriptor.contract_id.clone());
+
+    let digest = journal::request_digest(
+        &wire.domain,
+        &wire.type_name,
+        &wire.reference,
+        &wire.operation,
+        &wire.input,
+    );
+    context.request_digest = Some(digest.clone());
+
+    let Some(journal) = state.journal.as_deref() else {
+        return Err(ApiError::journal_unavailable());
+    };
+    let key = KeyScope {
+        actor: identity.subject.clone(),
+        domain: wire.domain.clone(),
+        type_name: wire.type_name.clone(),
+        reference: wire.reference.clone(),
+        operation: wire.operation.clone(),
+        idempotency_key: wire.idempotency_key.clone(),
+    };
+
+    match journal.lookup(&key, &digest).map_err(map_journal_error)? {
+        Lookup::Conflict => return Err(ApiError::idempotency_conflict()),
+        Lookup::InDoubt => return Err(ApiError::idempotency_in_doubt()),
+        Lookup::Replay(record) => {
+            if record.succeeded() {
+                context.result_digest = record.result_digest.clone();
+                return Ok(mutation_response(context, &record, true));
+            }
+            context.status_override = Some("failed".to_owned());
+            return Err(ApiError::replayed_failure());
+        }
+        Lookup::Execute => {}
+    }
+
+    journal
+        .begin(&key, &digest, &rfc3339(std::time::SystemTime::now()))
+        .map_err(map_journal_error)?;
+
+    // intent 已落盘：审计失败必须中止，绝不触达上游。
+    record_audit(state, context, "ok")?;
+    context.suppress_final_audit = true;
+
+    let request = MutateRequest {
+        domain: wire.domain,
+        type_name: wire.type_name,
+        reference,
+        actor: identity.subject.clone(),
+        operation: wire.operation,
+        idempotency_key: wire.idempotency_key,
+        input: wire.input,
+    };
+    let MutateRequest {
+        domain,
+        type_name,
+        reference,
+        actor,
+        operation,
+        idempotency_key,
+        input,
+    } = request;
+    let invocation = call_invoker(
+        &state.invokers,
+        InvokeRequest {
+            domain,
+            type_name,
+            reference,
+            actor,
+            operation,
+            idempotency_key,
+            input,
+        },
+    )
+    .await;
+
+    match invocation {
+        Ok(invocation) if invocation.status == InvocationStatus::Succeeded => {
+            let requires_materialization = capability
+                .result
+                .as_ref()
+                .is_some_and(|result| result.materialization == Materialization::Required);
+            if requires_materialization && invocation.result_ref.is_none() {
+                return finish_failed(
+                    state,
+                    journal,
+                    &key,
+                    &digest,
+                    context,
+                    ApiError::upstream_failure("materialization failed"),
+                );
+            }
+            if let Err(error) = journal.finish(
+                &key,
+                &digest,
+                "succeeded",
+                invocation.result_ref.as_deref(),
+                invocation.result_digest.as_deref(),
+                &rfc3339(std::time::SystemTime::now()),
+            ) {
+                context.status_override = Some("failed".to_owned());
+                let _ = record_audit(state, context, "failed");
+                return Err(map_journal_error(error));
+            }
+            context.result_digest = invocation.result_digest.clone();
+            record_audit(state, context, "ok")?;
+            let body = MutationBody {
+                status: "succeeded",
+                result_ref: invocation.result_ref,
+                result_digest: invocation.result_digest,
+                replayed: false,
+            };
+            Ok(json_response(StatusCode::OK, &context.trace_id, &body))
+        }
+        Ok(invocation) if invocation.status == InvocationStatus::Failed => finish_failed(
+            state,
+            journal,
+            &key,
+            &digest,
+            context,
+            ApiError::upstream_failure("capability mutation failed"),
+        ),
+        Ok(_) => {
+            // `Pending`：上游是否已生效未知，保持 in-doubt，不写 result。
+            context.status_override = Some("failed".to_owned());
+            record_audit(state, context, "failed")?;
+            Err(ApiError::upstream_failure(
+                "capability mutation outcome is unknown",
+            ))
+        }
+        Err(error) if error.code == Code::UPSTREAM_TIMEOUT || error.code == Code::INTERNAL => {
+            // 超时/任务失败：上游可能已执行，保持 in-doubt，不写 result。
+            context.status_override = Some("failed".to_owned());
+            record_audit(state, context, "failed")?;
+            Err(error)
+        }
+        Err(error) => finish_failed(state, journal, &key, &digest, context, error),
+    }
+}
+
+/// 上游明确失败：先落 `result = failed`，再落审计；台账失败优先于业务错误。
+fn finish_failed(
+    state: &AppState,
+    journal: &crate::journal::Journal,
+    key: &KeyScope,
+    digest: &str,
+    context: &mut AuditContext,
+    error: ApiError,
+) -> Result<Response, ApiError> {
+    context.status_override = Some("failed".to_owned());
+    if let Err(journal_error) = journal.finish(
+        key,
+        digest,
+        "failed",
+        None,
+        None,
+        &rfc3339(std::time::SystemTime::now()),
+    ) {
+        let _ = record_audit(state, context, "failed");
+        return Err(map_journal_error(journal_error));
+    }
+    record_audit(state, context, "failed")?;
+    Err(error)
+}
+
+fn mutation_response(context: &AuditContext, record: &MutationRecord, replayed: bool) -> Response {
+    let body = MutationBody {
+        status: if record.succeeded() {
+            "succeeded"
+        } else {
+            "failed"
+        },
+        result_ref: record.result_ref.clone(),
+        result_digest: record.result_digest.clone(),
+        replayed,
+    };
+    json_response(StatusCode::OK, &context.trace_id, &body)
+}
+
+fn map_journal_error(error: JournalError) -> ApiError {
+    match error {
+        JournalError::Unavailable(_) => ApiError::journal_unavailable(),
+        JournalError::Full => ApiError::journal_full(),
+        JournalError::Conflict => ApiError::idempotency_conflict(),
+    }
+}
+
+/// 审计写失败默认 fail-closed；`audit.fail_open = true` 时仅告警。
+fn record_audit(state: &AppState, context: &AuditContext, status: &str) -> Result<(), ApiError> {
+    match state.audit.record(&context.event(status)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if state.audit_fail_open {
+                eprintln!("refd: audit sink failure (fail_open = true): {error}");
+                Ok(())
+            } else {
+                Err(ApiError::audit_unavailable())
+            }
+        }
+    }
+}
+
 /// 引用必须落在卡片声明的服务标识之下，且带非空工具路径。
 fn reference_belongs_to(reference: &str, server_id: &str) -> bool {
     reference
@@ -655,6 +944,17 @@ struct InvokeBody {
     result_digest: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MutationBody {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_digest: Option<String>,
+    replayed: bool,
+}
+
 // ---------------------------------------------------------------------------
 // 请求校验
 // ---------------------------------------------------------------------------
@@ -693,6 +993,21 @@ struct InvokeWire {
     idempotency_key: String,
     #[serde(default)]
     input: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MutateWire {
+    domain: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    reference: String,
+    operation: String,
+    idempotency_key: String,
+    #[serde(default)]
+    input: serde_json::Value,
+    #[serde(default)]
+    pact_token_id: Option<String>,
 }
 
 fn parse_reference(raw: &str) -> Result<ReferenceForm, ApiError> {
@@ -774,6 +1089,10 @@ impl Code {
     const AUDIT_UNAVAILABLE: &'static str = "AuditUnavailable";
     const UPSTREAM_FAILURE: &'static str = "UpstreamFailure";
     const UPSTREAM_TIMEOUT: &'static str = "UpstreamTimeout";
+    const IDEMPOTENCY_CONFLICT: &'static str = "IdempotencyConflict";
+    const IDEMPOTENCY_IN_DOUBT: &'static str = "IdempotencyInDoubt";
+    const JOURNAL_UNAVAILABLE: &'static str = "JournalUnavailable";
+    const JOURNAL_FULL: &'static str = "JournalFull";
 }
 
 struct ApiError {
@@ -841,6 +1160,55 @@ impl ApiError {
         )
     }
 
+    fn audit_unavailable() -> Self {
+        let mut error = Self::with_message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Code::AUDIT_UNAVAILABLE,
+            "audit sink unavailable",
+        );
+        error.retryable = true;
+        error
+    }
+
+    fn idempotency_conflict() -> Self {
+        Self::with_message(
+            StatusCode::CONFLICT,
+            Code::IDEMPOTENCY_CONFLICT,
+            "idempotencyKey was already used with a different request",
+        )
+    }
+
+    fn idempotency_in_doubt() -> Self {
+        Self::with_message(
+            StatusCode::CONFLICT,
+            Code::IDEMPOTENCY_IN_DOUBT,
+            "previous mutation with this idempotencyKey is in doubt",
+        )
+    }
+
+    fn journal_unavailable() -> Self {
+        Self::with_message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Code::JOURNAL_UNAVAILABLE,
+            "mutation journal unavailable",
+        )
+    }
+
+    fn journal_full() -> Self {
+        Self::with_message(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Code::JOURNAL_FULL,
+            "mutation journal is full",
+        )
+    }
+
+    /// 重放历史失败结论：`retryable = false`，用 `detail.replayed` 标明来源。
+    fn replayed_failure() -> Self {
+        let mut error = Self::upstream_failure("capability mutation failed");
+        error.detail = Some(serde_json::json!({ "replayed": true }));
+        error
+    }
+
     fn digest_mismatch(expected: &str, actual: &str) -> Self {
         let mut error = Self::with_message(
             StatusCode::CONFLICT,
@@ -896,8 +1264,12 @@ struct AuditContext {
     operation: String,
     token_id: Option<String>,
     result_digest: Option<String>,
+    /// 写请求摘要（D53）；只读路径与重放路径不填。
+    request_digest: Option<String>,
     /// 业务层失败（如上游调用返回失败）时的审计状态覆盖。
     status_override: Option<String>,
+    /// `/v1/mutate` 已自行落 intent/result 审计，外层不再追加。
+    suppress_final_audit: bool,
 }
 
 impl AuditContext {
@@ -912,7 +1284,9 @@ impl AuditContext {
             operation: operation.to_owned(),
             token_id: None,
             result_digest: None,
+            request_digest: None,
             status_override: None,
+            suppress_final_audit: false,
         }
     }
 
@@ -929,6 +1303,7 @@ impl AuditContext {
             operation: Some(self.operation.clone()),
             status: status.to_owned(),
             result_digest: self.result_digest.clone(),
+            request_digest: self.request_digest.clone(),
             timestamp: rfc3339(std::time::SystemTime::now()),
         }
     }

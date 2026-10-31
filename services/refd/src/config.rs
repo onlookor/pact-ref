@@ -38,6 +38,9 @@ pub struct Config {
     /// 已登记的 MCP 服务端（D52）；未登记的 `mcp://` 引用拒绝调用。
     #[serde(default, rename = "mcp_servers")]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// 动态写幂等台账（D53）。存在 mutating profile 时必需。
+    #[serde(default)]
+    pub mutate: Option<MutateConfig>,
     /// 配置文件所在目录；相对路径以此为基准。不参与反序列化。
     #[serde(skip)]
     pub base_dir: PathBuf,
@@ -254,6 +257,23 @@ fn default_mcp_timeout_ms() -> u64 {
     10_000
 }
 
+/// 动态写幂等台账配置（D53）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutateConfig {
+    /// append-only JSONL 台账路径；父目录必须已存在。
+    pub journal: PathBuf,
+    #[serde(default = "default_max_mutate_entries")]
+    pub max_entries: usize,
+}
+
+fn default_max_mutate_entries() -> usize {
+    10_000
+}
+
+/// `[mutate].max_entries` 上限。
+pub const MAX_MUTATE_ENTRIES: usize = 1_000_000;
+
 /// 单次物化结果上限 16 MiB，避免上游响应把内存打满。
 pub const MAX_MATERIALIZE_BYTES: usize = 16 * 1024 * 1024;
 /// 单次上游调用超时上限 30s，与 `refd` 单请求上限一致。
@@ -449,6 +469,32 @@ impl Config {
                 return Err(format!("duplicate mcp_servers.id: {}", server.id));
             }
         }
+
+        if let Some(mutate) = &self.mutate {
+            if mutate.journal.as_os_str().is_empty() {
+                return Err("mutate.journal must not be empty".to_owned());
+            }
+            if mutate.max_entries == 0 || mutate.max_entries > MAX_MUTATE_ENTRIES {
+                return Err(format!(
+                    "mutate.max_entries must be in 1..={MAX_MUTATE_ENTRIES}"
+                ));
+            }
+            let path = self.absolute(&mutate.journal);
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                let metadata = std::fs::metadata(parent).map_err(|error| {
+                    format!("read mutate.journal dir {}: {error}", parent.display())
+                })?;
+                if !metadata.is_dir() {
+                    return Err(format!(
+                        "mutate.journal parent is not a directory: {}",
+                        parent.display()
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -481,6 +527,13 @@ impl Config {
     /// 审计文件路径（相对路径以配置文件目录为基准）。
     pub fn audit_path(&self) -> PathBuf {
         self.absolute(&self.audit.path)
+    }
+
+    /// 幂等台账路径（相对路径以配置文件目录为基准）。
+    pub fn mutate_journal_path(&self) -> Option<PathBuf> {
+        self.mutate
+            .as_ref()
+            .map(|mutate| self.absolute(&mutate.journal))
     }
 
     /// 相对路径转绝对路径。

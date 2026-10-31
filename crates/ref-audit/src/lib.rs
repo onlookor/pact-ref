@@ -109,6 +109,7 @@ mod tests {
             operation: Some("resolve".to_owned()),
             status: "ok".to_owned(),
             result_digest: None,
+            request_digest: None,
             timestamp: "2026-01-01T00:00:00Z".to_owned(),
         }
     }

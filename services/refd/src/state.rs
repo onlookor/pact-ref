@@ -14,6 +14,7 @@ use pact_ref_invoker::InvokerRegistry;
 use pact_ref_resolver::ResolverRegistry;
 
 use crate::config::{AuthMode, Config, Profile};
+use crate::journal::Journal;
 use crate::jwks::{FileJwksSource, HttpJwksSource};
 
 /// 已装配、可共享的服务状态。
@@ -24,6 +25,8 @@ pub struct AppState {
     pub audit_fail_open: bool,
     pub resolvers: Arc<ResolverRegistry>,
     pub invokers: Arc<InvokerRegistry>,
+    /// 动态写幂等台账（D53）；未配置 `[mutate]` 时为 `None`。
+    pub journal: Option<Arc<Journal>>,
     pub profiles: HashMap<(String, String), Profile>,
 }
 
@@ -110,6 +113,17 @@ impl AppState {
 
         let profiles = config.load_profiles()?;
 
+        // 台账启动即打开并回放到末尾；非法行或不可写直接拒绝启动（fail-closed）。
+        let journal = match &config.mutate {
+            Some(mutate) => {
+                let path = config.absolute(&mutate.journal);
+                let journal = Journal::open(&path, mutate.max_entries)
+                    .map_err(|error| format!("open mutate journal {}: {error}", path.display()))?;
+                Some(Arc::new(journal))
+            }
+            None => None,
+        };
+
         let mut invokers = InvokerRegistry::new();
         if !config.mcp_servers.is_empty() {
             let materialize = config.materialize.as_ref().ok_or_else(|| {
@@ -142,10 +156,31 @@ impl AppState {
         }
 
         // 只读能力必须指向已登记的服务端并有物化目录，否则调用阶段无法闭环。
+        // 动态写能力还要求幂等台账；任一缺失都拒绝启动。
         for ((domain, type_name), profile) in &profiles {
             let Some(capability) = &profile.card.spec.capability else {
                 continue;
             };
+            if capability.side_effect == SideEffect::Mutating {
+                if journal.is_none() {
+                    return Err(format!(
+                        "profile {domain}/{type_name} mutating capability requires [mutate].journal"
+                    ));
+                }
+                if config.mcp_server(&capability.server.id).is_none() {
+                    return Err(format!(
+                        "profile {domain}/{type_name} mutating capability requires \
+                         mcp_servers.id = {}",
+                        capability.server.id
+                    ));
+                }
+                if config.materialize.is_none() {
+                    return Err(format!(
+                        "profile {domain}/{type_name} mutating capability requires [materialize]"
+                    ));
+                }
+                continue;
+            }
             if capability.side_effect != SideEffect::ReadOnly {
                 continue;
             }
@@ -170,6 +205,7 @@ impl AppState {
             audit_fail_open: config.audit.fail_open,
             resolvers: Arc::new(resolvers),
             invokers: Arc::new(invokers),
+            journal,
             profiles,
         })
     }

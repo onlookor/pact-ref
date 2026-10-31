@@ -144,6 +144,37 @@ pub struct Invocation {
     pub error: Option<String>,
 }
 
+/// 动态写请求（D53）。
+///
+/// 与 [`InvokeRequest`] 形状相同但通道分离：写请求必须先经幂等台账，且只能作用于
+/// `mcp-mutating` profile；`input` 是工具参数，原样交给上游。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutateRequest {
+    pub domain: String,
+    pub type_name: String,
+    pub reference: ReferenceForm,
+    pub actor: String,
+    pub operation: String,
+    pub idempotency_key: String,
+    pub input: serde_json::Value,
+}
+
+/// 写入状态。`Failed` 表示上游明确失败；`in-doubt` 由台账判定，不进入本类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationStatus {
+    Succeeded,
+    Failed,
+}
+
+/// 写入结果。`replayed` 为真表示该结论来自台账重放，而非本次执行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mutation {
+    pub status: MutationStatus,
+    pub result_ref: Option<String>,
+    pub result_digest: Option<String>,
+    pub replayed: bool,
+}
+
 /// `describe` 的消费者投影白名单（治理 §13.6.6）。
 ///
 /// 不含 `metadata.owner|labels|description`、`parties`、`capability.server`、
@@ -373,6 +404,9 @@ pub struct AuditEvent {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_digest: Option<String>,
+    /// 写请求摘要（D53 两阶段审计）；只读路径不填。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_digest: Option<String>,
     pub timestamp: String,
 }
 
@@ -438,8 +472,8 @@ pub trait AuditSink {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_reference, ContractCard, ContractDescriptor, ReferenceError, ReferenceForm,
-        SpecError,
+        classify_reference, ContractCard, ContractDescriptor, Mutation, MutationStatus,
+        ReferenceError, ReferenceForm, SpecError,
     };
 
     const CARD: &str = r#"{
@@ -526,6 +560,23 @@ mod tests {
         let bindings = super::RefBindings::new("demo");
         assert_eq!(bindings.api_version, super::API_VERSION);
         assert_eq!(bindings.kind, "RefBindings");
+    }
+
+    #[test]
+    fn mutation_carries_replay_flag_and_status() {
+        let mutation = Mutation {
+            status: MutationStatus::Succeeded,
+            result_ref: Some("file:///var/lib/refd/materialized/a.json".to_owned()),
+            result_digest: Some("sha256:abc".to_owned()),
+            replayed: true,
+        };
+        assert_eq!(mutation.status, MutationStatus::Succeeded);
+        assert!(mutation.replayed);
+        assert_eq!(
+            mutation.result_ref.as_deref(),
+            Some("file:///var/lib/refd/materialized/a.json")
+        );
+        assert_eq!(MutationStatus::Failed, MutationStatus::Failed);
     }
 
     #[test]
