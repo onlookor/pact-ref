@@ -44,7 +44,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
       - run: cargo build --workspace
-      - run: cargo run -p pact-refd
+      - name: refd smoke
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/refd.toml" <<'EOF'
+          [server]
+          bind = "127.0.0.1:18081"
+          allow_plaintext = true
+
+          [auth]
+          mode = "deny"
+
+          [audit]
+          path = "/tmp/refd-ci-audit.jsonl"
+          EOF
+          ./target/debug/pact-refd "$RUNNER_TEMP/refd.toml" &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18081/healthz > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18081/healthz
+          curl -fsS http://127.0.0.1:18081/readyz
 
   docs:
     name: docs
