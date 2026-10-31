@@ -3,7 +3,8 @@ name = "pact-ref-adapter-oci"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "OCI scheme adapter skeleton"
+description = "OCI scheme adapter"
 
 [dependencies]
 pact-ref-core.workspace = true
+ureq.workspace = true

@@ -173,6 +173,12 @@ pub struct AdapterConfig {
     pub file: Option<FileAdapterConfig>,
     #[serde(default)]
     pub https: Option<HttpsAdapterConfig>,
+    /// `git+https://` adapter；缺省不注册该 scheme。
+    #[serde(default)]
+    pub git: Option<GitAdapterConfig>,
+    /// `oci://` adapter；缺省不注册该 scheme。
+    #[serde(default)]
+    pub oci: Option<OciAdapterConfig>,
 }
 
 /// `file://` adapter：所有路径必须落在 `root` 下。
@@ -191,6 +197,35 @@ pub struct HttpsAdapterConfig {
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }
+
+/// `git+https://` adapter：主机 allowlist，默认拒绝。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitAdapterConfig {
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 仅回环主机允许明文 `http://`。
+    #[serde(default)]
+    pub allow_plaintext: bool,
+}
+
+/// `oci://` adapter：registry allowlist，默认拒绝。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciAdapterConfig {
+    #[serde(default)]
+    pub registries: Vec<String>,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 仅回环 registry 允许明文 `http://`。
+    #[serde(default)]
+    pub allow_plaintext: bool,
+}
+
+/// adapter 单次上游超时上限 30s，与 `refd` 单请求上限一致。
+pub const MAX_ADAPTER_TIMEOUT_MS: u64 = 30_000;
 
 fn default_timeout_ms() -> u64 {
     10_000
@@ -431,6 +466,15 @@ impl Config {
             }
         }
 
+        if let Some(git) = &self.adapter.git {
+            validate_host_allowlist("adapter.git.allowed_hosts", &git.allowed_hosts)?;
+            validate_adapter_timeout("adapter.git.timeout_ms", git.timeout_ms)?;
+        }
+        if let Some(oci) = &self.adapter.oci {
+            validate_host_allowlist("adapter.oci.registries", &oci.registries)?;
+            validate_adapter_timeout("adapter.oci.timeout_ms", oci.timeout_ms)?;
+        }
+
         if let Some(materialize) = &self.materialize {
             if materialize.max_bytes == 0 {
                 return Err("materialize.max_bytes must be > 0".to_owned());
@@ -634,4 +678,131 @@ pub fn validate_selector(label: &str, value: &str) -> Result<(), String> {
         return Err(format!("{label} contains a control character"));
     }
     Ok(())
+}
+
+/// adapter 主机 allowlist：非空，每项为 `host` 或 `host:port`（或 `[v6]:port`）。
+fn validate_host_allowlist(label: &str, entries: &[String]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    for entry in entries {
+        validate_host_entry(label, entry)?;
+    }
+    Ok(())
+}
+
+/// 拒绝 scheme、userinfo、路径、query、fragment 与控制字符；端口须在 1..=65535。
+fn validate_host_entry(label: &str, value: &str) -> Result<(), String> {
+    let invalid = || format!("{label} contains an invalid host entry: {value}");
+    if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(invalid());
+    }
+    if value.contains(['/', '?', '#', '@']) {
+        return Err(invalid());
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').ok_or_else(invalid)?;
+        if host.is_empty() || host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(invalid());
+        }
+        return match tail {
+            "" => Ok(()),
+            _ => match tail.strip_prefix(':') {
+                Some(port) => validate_port(port).map_err(|_| invalid()),
+                None => Err(invalid()),
+            },
+        };
+    }
+    let (host, port) = match value.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (value, None),
+    };
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Err(invalid());
+    }
+    if let Some(port) = port {
+        validate_port(port).map_err(|_| invalid())?;
+    }
+    Ok(())
+}
+
+fn validate_port(port: &str) -> Result<(), ()> {
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    match port.parse::<u16>() {
+        Ok(value) if value > 0 => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// adapter 超时：必须 > 0 且不超过 `MAX_ADAPTER_TIMEOUT_MS`。
+fn validate_adapter_timeout(label: &str, timeout_ms: u64) -> Result<(), String> {
+    if timeout_ms == 0 || timeout_ms > MAX_ADAPTER_TIMEOUT_MS {
+        return Err(format!("{label} must be in 1..={MAX_ADAPTER_TIMEOUT_MS}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{Config, MAX_ADAPTER_TIMEOUT_MS};
+
+    fn validate(adapter: &str) -> Result<(), String> {
+        let text = format!(
+            "[server]\nallow_plaintext = true\n\n[audit]\npath = \"audit.jsonl\"\n\n{adapter}"
+        );
+        Config::from_toml(&text, Path::new("."))?.validate()
+    }
+
+    #[test]
+    fn accepts_git_and_oci_allowlists_with_ports() {
+        let adapter = r#"
+[adapter.git]
+allowed_hosts = ["git.example.com", "127.0.0.1:8443", "[::1]:9000"]
+timeout_ms = 5000
+allow_plaintext = true
+
+[adapter.oci]
+registries = ["registry.example.com", "127.0.0.1:5000"]
+"#;
+        assert!(validate(adapter).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_and_malformed_allowlists() {
+        for entry in [
+            "",
+            "https://git.example.com",
+            "git.example.com/path",
+            "user@git.example.com",
+            "git.example.com:0",
+            "git.example.com:70000",
+            "git.example.com:abc",
+        ] {
+            let adapter = format!("[adapter.git]\nallowed_hosts = [\"{entry}\"]\n");
+            assert!(validate(&adapter).is_err(), "must reject {entry}");
+        }
+        assert!(validate("[adapter.git]\nallowed_hosts = []\n").is_err());
+        assert!(validate("[adapter.oci]\nregistries = []\n").is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_adapter_timeouts() {
+        let too_large = (MAX_ADAPTER_TIMEOUT_MS + 1).to_string();
+        for timeout in ["0", too_large.as_str()] {
+            let adapter = format!(
+                "[adapter.oci]\nregistries = [\"registry.example.com\"]\ntimeout_ms = {timeout}\n"
+            );
+            assert!(validate(&adapter).is_err(), "must reject {timeout}");
+        }
+    }
 }

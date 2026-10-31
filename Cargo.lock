@@ -614,6 +614,7 @@ name = "pact-ref-adapter-git"
 version = "0.1.0"
 dependencies = [
  "pact-ref-core",
+ "ureq",
 ]
 
 [[package]]
@@ -639,6 +640,7 @@ name = "pact-ref-adapter-oci"
 version = "0.1.0"
 dependencies = [
  "pact-ref-core",
+ "ureq",
 ]
 
 [[package]]
@@ -724,8 +726,10 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken",
  "pact-ref-adapter-file",
+ "pact-ref-adapter-git",
  "pact-ref-adapter-http",
  "pact-ref-adapter-mcp",
+ "pact-ref-adapter-oci",
  "pact-ref-audit",
  "pact-ref-auth",
  "pact-ref-core",

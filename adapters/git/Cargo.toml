@@ -3,7 +3,8 @@ name = "pact-ref-adapter-git"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Git scheme adapter skeleton"
+description = "Git scheme adapter"
 
 [dependencies]
 pact-ref-core.workspace = true
+ureq.workspace = true

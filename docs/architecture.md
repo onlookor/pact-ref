@@ -168,6 +168,18 @@ root = "artifacts"             # 所有 file:// 目标必须 canonicalize 到该
 allowed_hosts = ["artifacts.example.com"]
 timeout_ms = 10000
 
+# git+https：仅在存在该表时注册 git+https / git+ssh 两个 scheme
+[adapter.git]
+allowed_hosts = ["github.com", "git.internal:8443"]  # 非空；host 或 host:port
+timeout_ms = 10000             # 缺省 10000，1..=30000
+allow_plaintext = false        # 仅回环主机可设 true
+
+# oci：仅在存在该表时注册 oci scheme
+[adapter.oci]
+registries = ["registry.example.com", "localhost:5000"]  # 非空；host 或 host:port
+timeout_ms = 10000             # 缺省 10000，1..=30000
+allow_plaintext = false        # 仅回环 registry 可设 true
+
 # 动态只读调用（mcp-read）；存在只读能力 profile 时两段都必需
 [materialize]
 dir = "materialized"           # 必须已存在且为目录；产物为 <sha256>.json
@@ -226,7 +238,8 @@ OIDC 行为要点：
 
 ## 引导阶段
 
-当前 crate 已包含可运行的 `refd` 与 `file`/`https` adapter；其余 adapter 仍是占位。
+当前 crate 已包含可运行的 `refd` 与 `file`/`https`/`git+https`/`oci` adapter；`git+ssh`
+注册但显式返回不支持（`UnsupportedIdentifier`），`git+file` 不实现。
 CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
 规范层（`pact-ref-spec` 与 `spec/ref/v1/`）已在 `pact` 仓库落地，本仓库以 vendored 快照消费。
 下一步：
@@ -234,8 +247,10 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
 1. ~~在 `pact` 仓库抽取 `pact-ref-spec` 与 `spec/ref/v1/`，并把本仓库切换到发布版本。~~
    已完成抽取与快照消费；待规范发布注册表后切换为纯版本依赖。
 2. ~~实现 `refd` 的 `/v1/resolve` 与 `/v1/describe`。~~ 已完成（2026-10-31）：`deny`/`static` 认证、scope + 对象 ACL、审计 fail-closed、传输约束与错误信封；14 项集成测试覆盖主要分支。
-3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。`file` 与 `https` 已完成；
-   `git`/`oci` 仍待实现。
+3. ~~实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。~~ 已完成（2026-10-31）：
+   `file`/`https` 在端点实现时落地；`git+https`（smart HTTP 广告解析、commit 钉进 `handle`、
+   2 MiB 上限）与 `oci`（`HEAD` manifest、`Docker-Content-Digest` 归一化、1 MiB 上限）本轮完成，
+   共用 host/registry allowlist、`redirects(0)`、≤30s 超时；`git+ssh` 显式不支持，`git+file` 不实现。
 4. ~~实现 `mcp-read` profile 与结果物化。~~ 已完成（2026-10-31）：`POST /v1/invoke`、
    只读闸门、引用归属校验、`mcp` adapter 的 JSON-RPC `tools/call`、内容寻址物化与
    启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。

@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pact_ref_adapter_file::Adapter as FileAdapter;
+use pact_ref_adapter_git::{Adapter as GitAdapter, SshAdapter as GitSshAdapter};
 use pact_ref_adapter_http::Adapter as HttpAdapter;
 use pact_ref_adapter_mcp::{Adapter as McpAdapter, ServerConfig as McpServer};
+use pact_ref_adapter_oci::Adapter as OciAdapter;
 use pact_ref_audit::FileAuditSink;
 use pact_ref_auth::oidc::{JwksSource, OidcAuthenticator, OidcSettings};
 use pact_ref_auth::{Acl, AclRule, Authenticator, DenyAuthenticator, StaticTokenAuthenticator};
@@ -108,6 +110,22 @@ impl AppState {
             resolvers.register(Box::new(HttpAdapter::new(
                 https.allowed_hosts.clone(),
                 https.timeout_ms,
+            )));
+        }
+        if let Some(git) = &config.adapter.git {
+            resolvers.register(Box::new(GitAdapter::new(
+                git.allowed_hosts.clone(),
+                git.timeout_ms,
+                git.allow_plaintext,
+            )));
+            // `git+ssh` 在 v1 显式不支持，但注册后能给出明确的失败而非 UnknownScheme。
+            resolvers.register(Box::new(GitSshAdapter::new()));
+        }
+        if let Some(oci) = &config.adapter.oci {
+            resolvers.register(Box::new(OciAdapter::new(
+                oci.registries.clone(),
+                oci.timeout_ms,
+                oci.allow_plaintext,
             )));
         }
 
