@@ -8,13 +8,21 @@ PACT 的**物引治理平面**：把 token 上的 `ThingRef` 兑现为可解析�
 
 ## 状态
 
-引导阶段（bootstrap）。仓库结构、纯类型/trait 骨架、示例、部署模板与 GitHub CI 已就绪；
-`pact-refd` 目前只打印装配状态，尚未实现 HTTP 服务、真实适配器与一致性用例。
+**可用（v1，2026-10-31）**。`pact-refd` 已实现 HTTP 服务与一致性用例：
+
+- 端点：`GET /healthz`、`GET /readyz`、`POST /v1/resolve`、`POST /v1/describe`、`POST /v1/invoke`、`POST /v1/mutate`。
+- 认证：`deny` / 静态令牌（scope + ACL）/ OIDC（JWT + JWKS 文件或 HTTPS）；审计 append-only 且 fail-closed。
+- adapter：`file`、`https`、`git`（仅 `git+https`）、`oci`、`mcp`（只读 `tools/call` 与 mutating）。
+- 一致性：`conformance/runner` 驱动 `conformance/cases/**/*.yaml`，当前覆盖 `entry/` 23 例。
+
+尚未实现：`revoke`、可选注册表（`ref-registry` 仅有内存实现，未接入 `refd`），以及
+`resolve`/`invoke` 数据面 conformance 用例（依赖 adapter 假服务方案）。`/v1/resolve` 与
+`/v1/describe` 仍只接受 URI，Identifier 返回 `400 InvalidReference`。
 
 规范层已抽取为 `pact` 仓库的 `pact-ref-spec` 纯 crate 与 `spec/ref/v1/` 正文。本仓库
 以 `0.1.0` + `vendor/pact-ref-spec` 只读快照的方式消费，`ref-core` 直接 re-export 规范类型，
-不再自建一套校验。当前 35 项测试覆盖引用分类、规范消费、示例契约/绑定、scheme 路由、
-注册表、授权、审计与客户端门面。
+不再自建一套校验。工作区共 175 项测试，覆盖引用分类、规范消费、适配器、认证、审计、
+端点集成、示例与一致性用例。
 
 ## 它解决什么
 
@@ -66,19 +74,23 @@ docs/                  架构、运维、ADR、scheme 说明
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run -p pact-refd
+cargo run -p pact-refd -- services/refd/refd.toml
 ```
 
-`pact-refd` 当前只打印引导信息，不监听端口。
+`pact-refd` 以位置参数读取配置路径（或环境变量 `REFD_CONFIG`）；配置缺失或非法时启动即失败
+（fail-closed），不监听端口。
 
-## 最小参考平面 API（规划）
+## 参考平面 API
 
 ```text
-resolve(domain, type, ref, actor, intent) -> { handle, digest, media_type, contract_id, version, expires_at }
-invoke(domain, type, ref, actor, operation, input, idempotency_key) -> { status, result_ref?, result_digest?, error? }
-describe(ref) -> ContractCard
-revoke(ref, actor, reason) -> {}
+POST /v1/resolve   { domain, type, reference, intent } -> { handle, digest, media_type, contract_id, version, expires_at }
+POST /v1/describe  { reference } -> ContractCard 投影
+POST /v1/invoke    { domain, type, reference, operation, idempotency_key, input? } -> { status, result_ref?, result_digest?, error? }
+POST /v1/mutate    { domain, type, reference, operation, idempotency_key, input?, pact_token_id? } -> { status, replayed, result_ref?, result_digest?, error? }
+GET  /healthz | /readyz
 ```
+
+`revoke` 未实现：v1 不提供撤销端点。
 
 ## 安全
 
