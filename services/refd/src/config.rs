@@ -70,6 +70,8 @@ pub struct AuthConfig {
     pub mode: AuthMode,
     #[serde(default, rename = "static")]
     pub static_token: Option<StaticAuthConfig>,
+    #[serde(default)]
+    pub oidc: Option<OidcAuthConfig>,
 }
 
 /// 认证模式。
@@ -93,6 +95,57 @@ pub struct StaticAuthConfig {
     #[serde(default)]
     pub scopes: Vec<String>,
 }
+
+/// OIDC 资源服务器配置（D51）。`jwks_uri` 与 `jwks_file` 恰有一个。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcAuthConfig {
+    pub issuer: String,
+    #[serde(default = "default_audience")]
+    pub audience: String,
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    #[serde(default)]
+    pub jwks_file: Option<PathBuf>,
+    #[serde(default = "default_algorithms")]
+    pub algorithms: Vec<String>,
+    #[serde(default = "default_leeway_seconds")]
+    pub leeway_seconds: u64,
+    #[serde(default = "default_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+    #[serde(default = "default_oidc_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_audience() -> String {
+    "pact-ref".to_owned()
+}
+
+fn default_algorithms() -> Vec<String> {
+    OIDC_ALGORITHMS
+        .iter()
+        .map(|alg| (*alg).to_owned())
+        .collect()
+}
+
+fn default_leeway_seconds() -> u64 {
+    60
+}
+
+fn default_cache_ttl_seconds() -> u64 {
+    300
+}
+
+fn default_oidc_timeout_ms() -> u64 {
+    5_000
+}
+
+/// 允许的 JWT 签名算法白名单。`none` 与 `HS*` 永不允许。
+pub const OIDC_ALGORITHMS: &[&str] = &["RS256", "ES256", "EdDSA"];
+/// JWKS 响应/文件上限 1 MiB。
+pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
+/// `exp`/`nbf` 时钟偏差上限 60s。
+pub const MAX_LEEWAY_SECONDS: u64 = 60;
 
 /// 审计配置。
 #[derive(Debug, Clone, Deserialize)]
@@ -216,9 +269,71 @@ impl Config {
                 }
             }
             AuthMode::Oidc => {
-                return Err(
-                    "auth.mode = oidc is not implemented in v1; use static or deny".to_owned(),
-                );
+                let oidc =
+                    self.auth.oidc.as_ref().ok_or_else(|| {
+                        "auth.mode = oidc requires an [auth.oidc] table".to_owned()
+                    })?;
+                validate_https_endpoint("auth.oidc.issuer", &oidc.issuer)?;
+                if oidc.audience.trim().is_empty() {
+                    return Err("auth.oidc.audience must not be empty".to_owned());
+                }
+                match (&oidc.jwks_uri, &oidc.jwks_file) {
+                    (Some(uri), None) => {
+                        validate_https_endpoint("auth.oidc.jwks_uri", uri)?;
+                    }
+                    (None, Some(file)) => {
+                        let path = self.absolute(file);
+                        let metadata = std::fs::metadata(&path).map_err(|error| {
+                            format!("read auth.oidc.jwks_file {}: {error}", path.display())
+                        })?;
+                        if !metadata.is_file() {
+                            return Err(format!(
+                                "auth.oidc.jwks_file is not a regular file: {}",
+                                path.display()
+                            ));
+                        }
+                        if metadata.len() > MAX_JWKS_BYTES as u64 {
+                            return Err(format!(
+                                "auth.oidc.jwks_file exceeds {MAX_JWKS_BYTES} bytes: {}",
+                                path.display()
+                            ));
+                        }
+                        let bytes = std::fs::read(&path).map_err(|error| {
+                            format!("read auth.oidc.jwks_file {}: {error}", path.display())
+                        })?;
+                        serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
+                            format!("auth.oidc.jwks_file is not valid JSON: {}", path.display())
+                        })?;
+                    }
+                    _ => {
+                        return Err(
+                            "auth.oidc requires exactly one of jwks_uri or jwks_file".to_owned()
+                        )
+                    }
+                }
+                if oidc.algorithms.is_empty() {
+                    return Err("auth.oidc.algorithms must not be empty".to_owned());
+                }
+                if let Some(unknown) = oidc
+                    .algorithms
+                    .iter()
+                    .find(|alg| !OIDC_ALGORITHMS.contains(&alg.as_str()))
+                {
+                    return Err(format!(
+                        "auth.oidc.algorithms only allows RS256, ES256 and EdDSA: {unknown}"
+                    ));
+                }
+                if oidc.leeway_seconds > MAX_LEEWAY_SECONDS {
+                    return Err(format!(
+                        "auth.oidc.leeway_seconds must be <= {MAX_LEEWAY_SECONDS}"
+                    ));
+                }
+                if oidc.cache_ttl_seconds == 0 {
+                    return Err("auth.oidc.cache_ttl_seconds must be > 0".to_owned());
+                }
+                if oidc.timeout_ms == 0 {
+                    return Err("auth.oidc.timeout_ms must be > 0".to_owned());
+                }
             }
         }
 
@@ -285,6 +400,27 @@ impl Config {
             self.base_dir.join(path)
         }
     }
+}
+
+/// 仅接受 `https://`，拒绝 userinfo、fragment 与控制字符。
+fn validate_https_endpoint(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!("{label} must be a non-empty https URL"));
+    }
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return Err(format!("{label} must use https://"));
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return Err(format!("{label} must use https://"));
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return Err(format!("{label} must not contain userinfo"));
+    }
+    if value.contains('#') {
+        return Err(format!("{label} must not contain a fragment"));
+    }
+    Ok(())
 }
 
 /// `domain` / `type` 只做长度与控制字符校验，不解释语义。

@@ -6,11 +6,13 @@ use std::sync::Arc;
 use pact_ref_adapter_file::Adapter as FileAdapter;
 use pact_ref_adapter_http::Adapter as HttpAdapter;
 use pact_ref_audit::FileAuditSink;
+use pact_ref_auth::oidc::{JwksSource, OidcAuthenticator, OidcSettings};
 use pact_ref_auth::{Acl, AclRule, Authenticator, DenyAuthenticator, StaticTokenAuthenticator};
 use pact_ref_core::AuditSink;
 use pact_ref_resolver::ResolverRegistry;
 
 use crate::config::{AuthMode, Config, Profile};
+use crate::jwks::{FileJwksSource, HttpJwksSource};
 
 /// 已装配、可共享的服务状态。
 pub struct AppState {
@@ -42,7 +44,30 @@ impl AppState {
                 ))
             }
             AuthMode::Oidc => {
-                return Err("auth.mode = oidc is not implemented in v1".to_owned());
+                let oidc = config
+                    .auth
+                    .oidc
+                    .as_ref()
+                    .ok_or_else(|| "auth.mode = oidc requires [auth.oidc]".to_owned())?;
+                let settings = OidcSettings {
+                    issuer: oidc.issuer.clone(),
+                    audience: oidc.audience.clone(),
+                    algorithms: oidc.algorithms.clone(),
+                    leeway_seconds: oidc.leeway_seconds,
+                    cache_ttl_seconds: oidc.cache_ttl_seconds,
+                };
+                let source: Arc<dyn JwksSource + Send + Sync> =
+                    match (&oidc.jwks_file, &oidc.jwks_uri) {
+                        (Some(file), None) => Arc::new(FileJwksSource::new(config.absolute(file))),
+                        (None, Some(uri)) => {
+                            Arc::new(HttpJwksSource::new(uri.clone(), oidc.timeout_ms))
+                        }
+                        _ => {
+                            return Err("auth.oidc requires exactly one of jwks_uri or jwks_file"
+                                .to_owned())
+                        }
+                    };
+                Arc::new(OidcAuthenticator::new(settings, source))
             }
         };
 

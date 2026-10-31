@@ -112,12 +112,16 @@ async fn business(state: Arc<AppState>, request: Request, operation: Operation) 
         );
     }
 
-    let identity = match state
-        .authenticator
-        .authenticate(authorization(&parts.headers))
+    // OIDC 验证器可能触发 JWKS 文件/HTTP 拉取，必须在阻塞线程池执行。
+    let authenticator = Arc::clone(&state.authenticator);
+    let credential = authorization(&parts.headers).map(str::to_owned);
+    let identity = match tokio::task::spawn_blocking(move || {
+        authenticator.authenticate(credential.as_deref())
+    })
+    .await
     {
-        Ok(identity) => identity,
-        Err(_) => return unauthorized(&trace_id),
+        Ok(Ok(identity)) => identity,
+        Ok(Err(_)) | Err(_) => return unauthorized(&trace_id),
     };
 
     let mut context = AuditContext::new(

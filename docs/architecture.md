@@ -38,6 +38,10 @@ participants
 | `refd` | 上述 crate | PACT store 直写 |
 | `ref-client` | `ref-core` | 具体网络实现 |
 
+`ref-auth` 的 JWT 验签只依赖 `jsonwebtoken` 与 `base64`：它不发起网络请求，JWKS 取回由
+`refd` 注入的 `JwksSource` 实现承担（`FileJwksSource` 读本地文件，`HttpJwksSource` 用
+`ureq`/rustls 走 HTTPS）。网络来源因此不进 `ref-auth`，测试也能注入假源。
+
 `pact-ref-spec` 由 `pact` 仓库维护，无 IO、无网络、无文件系统，可编译到
 `wasm32-unknown-unknown`；引导阶段以 `vendor/pact-ref-spec` 只读快照消费，发布后改为纯版本依赖。
 
@@ -100,13 +104,24 @@ bind = "127.0.0.1:8080"        # v1 无 TLS，只接受回环地址
 allow_plaintext = true         # 回环明文必须显式开启
 
 [auth]
-mode = "static"                # deny（默认）| static；oidc 启动即失败
+mode = "static"                # deny（默认）| static | oidc
 
 [auth.static]
 allow = true
 token = "changeme"
 subject = "alice"
 scopes = ["ref:resolve", "ref:describe"]
+
+# mode = "oidc" 时必须提供 [auth.oidc]；jwks_uri 与 jwks_file 恰有一个
+# [auth.oidc]
+# issuer = "https://idp.example.com"
+# audience = "pact-ref"                                        # 默认 pact-ref
+# jwks_uri = "https://idp.example.com/.well-known/jwks.json"    # 仅 https，无 userinfo/fragment
+# jwks_file = "jwks.json"                                       # 或本地文件，相对配置文件目录
+# algorithms = ["RS256", "ES256", "EdDSA"]                      # 默认这三项
+# leeway_seconds = 60                                           # 默认 60，上限 60
+# cache_ttl_seconds = 300                                       # 默认 300
+# timeout_ms = 5000                                             # 默认 5000，仅 jwks_uri 生效
 
 [audit]
 path = "audit.jsonl"           # append-only；相对配置文件目录
@@ -136,7 +151,20 @@ card = "cards/build-artifact.yaml"
 REFD_CONFIG=deploy/refd.toml cargo run -p pact-refd
 ```
 
-`/readyz` 只检查审计 sink 可写；`[auth] mode = oidc` 尚未实现，启动即报错而不是降级为匿名。
+`/readyz` 只检查配置已加载与审计 sink 可写；OIDC 模式不在启动或就绪探针中访问 JWKS，
+取不到密钥只在请求期以 `401` 体现（不让 `refd` 变成 IdP 代理，也不让探针放大网络请求）。
+
+OIDC 行为要点：
+
+- actor 取验证后的 `sub`；`scope` claim（空格分隔字符串或字符串数组）映射端点 scope，
+  与对象 ACL 两层判定，缺 scope 返回 `403`。
+- 算法白名单 `RS256`/`ES256`/`EdDSA`；`none`、`HS*`、带 `crit` 头部一律拒绝。
+- 有 `kid` 按 `kid` + 算法参数选键；无 `kid` 仅在唯一可用密钥时接受。
+- JWKS 有界缓存（≤ 64 密钥、`cache_ttl_seconds`）；未知 `kid` 触发一次强制刷新，
+  30s 内不重复刷新。
+- 任一失败（缺凭据、签名、`iss`/`aud`/`exp`/`nbf`、JWKS 不可用）统一 `401` +
+  `WWW-Authenticate: Bearer realm="pact-ref"`，不区分原因。
+- 验签在 `tokio::task::spawn_blocking` 中执行，不阻塞 axum 工作线程。
 
 ## 与 PACT 的边界
 
@@ -159,4 +187,7 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
    `git`/`oci` 仍待实现。
 4. 实现 `mcp-read` profile 与结果物化。
 5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
-6. 实现 OIDC（JWT/JWKS）验证器；当前 `[auth] mode = oidc` 启动即失败。
+6. ~~实现 OIDC（JWT/JWKS）验证器。~~ 已完成（2026-10-31）：`ref-auth` 的
+   `OidcAuthenticator` + `JwksSource`，`refd` 的 `[auth.oidc]` 与
+   `FileJwksSource`/`HttpJwksSource`；算法白名单、`iss`/`aud`/`exp`/`nbf`、未知 `kid`
+   限频刷新、统一 401。单测 11 项 + 集成测试 3 项。

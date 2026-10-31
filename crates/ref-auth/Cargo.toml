@@ -7,3 +7,9 @@ description = "PACT 物引 principal、授权、audience 与撤销骨架"
 
 [dependencies]
 pact-ref-core.workspace = true
+jsonwebtoken.workspace = true
+base64.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ring.workspace = true

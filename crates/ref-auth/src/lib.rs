@@ -1,7 +1,9 @@
 //! principal、认证、scope 与对象 ACL 求值。
 //!
-//! 生产实现必须接入真实身份源；`Deny` 为缺省，`Static` 仅用于引导/受控内网。
-//! OIDC（JWT/JWKS）验证器尚未实现，配置为 `oidc` 时服务拒绝启动。
+//! 生产实现接入真实身份源；`Deny` 为缺省，`Static` 仅用于引导/受控内网，
+//! `Oidc` 以 JWT/JWKS 验证 IdP 签发的令牌（D51）。
+
+pub mod oidc;
 
 use pact_ref_core::{Authorizer, ReferenceError, ReferenceForm, ResolveIntent};
 

@@ -2,6 +2,7 @@
 
 pub mod config;
 mod handlers;
+mod jwks;
 pub mod state;
 mod time;
 
