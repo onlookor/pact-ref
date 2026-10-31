@@ -56,18 +56,22 @@ participants
 5. 参与者验证并消费制品。
 6. 参与者通过正常 `seed` / `produce` 产生 witness token 记录结果。
 
-### 动态 invoke
+### 动态 invoke（只读，已实现）
 
-1. 参与者确认 ContractCard 的 profile（`mcp-read` 或 `mcp-mutating`）。
-2. 参与者带 `idempotency_key` 调用 `invoke(...)`。
-3. adapter 执行调用，返回状态与可物化结果。
-4. 需要长期依赖时，参与者把结果物化为静态 ref，再产生新 token。
-5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据。
+1. 参与者确认 ContractCard 的 profile 为 `mcp-read`（`capability.sideEffect = read-only`）。
+2. 参与者带 `idempotency_key` 调用 `POST /v1/invoke`；`reference` 必须落在卡片声明的
+   `capability.server.id` 之下。
+3. `refd` 经 `InvokerRegistry` 路由到 `mcp` adapter，以 JSON-RPC 2.0 `tools/call` 调用上游。
+4. 结果按内容寻址写入 `[materialize].dir/<sha256>.json`，返回 `file://` 的 `resultRef`
+   与 `sha256:` 的 `resultDigest`；参与者随后用 `/v1/resolve` 读取，并产生新的 witness token。
+5. 审计边车记录 ID、摘要、状态、时间，不记录正文/凭据；上游失败记 `status=failed`。
+6. `mcp-mutating` 不在本层实现，动态写阶段另行定案。
 
 ## Reference Plane API（已实现）
 
 契约冻结在 `pact` 仓库的 `spec/ref/v1/reference-plane.openapi.yaml`，设计定案见
-`docs/thingref-governance.md` §13.6。首版只含 resolve/describe；invoke/revoke 随动态阶段另行定案。
+`docs/thingref-governance.md` §13.6（resolve/describe）与 §13.7（只读 invoke）。
+首版含 resolve/describe/只读 invoke；`revoke` 与 `mcp-mutating` 随动态写阶段另行定案。
 `refd` 已按该契约实现（2026-10-31）。
 
 ```text
@@ -79,6 +83,10 @@ POST /v1/describe
   { domain, type, reference }
   -> 200 ContractDescriptor   # 白名单投影，非完整 ContractCard
 
+POST /v1/invoke
+  { domain, type, reference, operation, idempotencyKey, input? }
+  -> 200 { status: "succeeded", resultRef, resultDigest }   # 仅只读能力
+
 GET /healthz, /readyz         # 不带版本，security: []
 ```
 
@@ -86,8 +94,10 @@ GET /healthz, /readyz         # 不带版本，security: []
 
 - 主体来自验证后的凭据 `sub`；请求体不接受 `actor`。
 - v1 只接受 URI；`∅`/`null`/Identifier/裸路径 → `400 InvalidReference`。
-- 端点 scope（`ref:resolve` / `ref:describe`）与对象 ACL 两层，并集允许、默认拒绝。
+- 端点 scope（`ref:resolve` / `ref:describe` / `ref:invoke`）与对象 ACL 两层，并集允许、默认拒绝。
 - `intent=read` 返回 `handle` + `expiresAt`；`intent=verify` 只校验存在性与摘要，禁止返回 `handle`。
+- `invoke` 只接受 `capability.sideEffect = read-only`；`mutating` 一律 `403`；上游失败统一
+  `502 UpstreamFailure`，不重试、不轮询。
 - `describe` 不透出 `metadata.owner|labels|description`、`parties`、`capability.server`、
   `capability.auth.credentialSource`、`resolution.endpoint`。
 - 错误统一信封 `{code, message, traceId, retryable, detail?}`；401 与 403 严格区分。
@@ -134,12 +144,24 @@ root = "artifacts"             # 所有 file:// 目标必须 canonicalize 到该
 allowed_hosts = ["artifacts.example.com"]
 timeout_ms = 10000
 
+# 动态只读调用（mcp-read）；存在只读能力 profile 时两段都必需
+[materialize]
+dir = "materialized"           # 必须已存在且为目录；产物为 <sha256>.json
+max_bytes = 1048576            # 缺省 1 MiB，上限 16 MiB
+
+[[mcp_servers]]
+id = "mcp://tools.example"     # 与卡片 capability.server.id 一致
+endpoint = "https://tools.example/mcp"
+timeout_ms = 10000             # 上限 30000
+bearer_token_env = "TOOLS_TOKEN"  # 可选；设置则必须非空，否则拒绝启动
+allow_plaintext = false        # 仅回环主机可设 true
+
 [[acl]]
 principal = "alice"
 domains = ["build"]
 types = ["artifact"]
 schemes = ["file"]
-operations = ["resolve:read", "resolve:verify", "describe"]
+operations = ["resolve:read", "resolve:verify", "describe", "invoke"]
 
 [[profiles]]
 domain = "build"
@@ -185,7 +207,9 @@ CI 已覆盖 fmt、clippy、test、docs 与依赖审计。
 2. ~~实现 `refd` 的 `/v1/resolve` 与 `/v1/describe`。~~ 已完成（2026-10-31）：`deny`/`static` 认证、scope + 对象 ACL、审计 fail-closed、传输约束与错误信封；14 项集成测试覆盖主要分支。
 3. 实现 https/file/git/oci adapter 与 SSRF/路径穿越防护。`file` 与 `https` 已完成；
    `git`/`oci` 仍待实现。
-4. 实现 `mcp-read` profile 与结果物化。
+4. ~~实现 `mcp-read` profile 与结果物化。~~ 已完成（2026-10-31）：`POST /v1/invoke`、
+   只读闸门、引用归属校验、`mcp` adapter 的 JSON-RPC `tools/call`、内容寻址物化与
+   启动 fail-closed（`[materialize]` / `[[mcp_servers]]`）。`mcp-mutating` 仍待动态写阶段。
 5. 加入一致性测试与审计边车；`refd` 审计已落地，conformance runner 仍是骨架。
 6. ~~实现 OIDC（JWT/JWKS）验证器。~~ 已完成（2026-10-31）：`ref-auth` 的
    `OidcAuthenticator` + `JwksSource`，`refd` 的 `[auth.oidc]` 与

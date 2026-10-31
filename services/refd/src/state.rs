@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use pact_ref_adapter_file::Adapter as FileAdapter;
 use pact_ref_adapter_http::Adapter as HttpAdapter;
+use pact_ref_adapter_mcp::{Adapter as McpAdapter, ServerConfig as McpServer};
 use pact_ref_audit::FileAuditSink;
 use pact_ref_auth::oidc::{JwksSource, OidcAuthenticator, OidcSettings};
 use pact_ref_auth::{Acl, AclRule, Authenticator, DenyAuthenticator, StaticTokenAuthenticator};
-use pact_ref_core::AuditSink;
+use pact_ref_core::{AuditSink, SideEffect};
+use pact_ref_invoker::InvokerRegistry;
 use pact_ref_resolver::ResolverRegistry;
 
 use crate::config::{AuthMode, Config, Profile};
@@ -21,6 +23,7 @@ pub struct AppState {
     pub audit: Arc<dyn AuditSink + Send + Sync>,
     pub audit_fail_open: bool,
     pub resolvers: Arc<ResolverRegistry>,
+    pub invokers: Arc<InvokerRegistry>,
     pub profiles: HashMap<(String, String), Profile>,
 }
 
@@ -107,12 +110,66 @@ impl AppState {
 
         let profiles = config.load_profiles()?;
 
+        let mut invokers = InvokerRegistry::new();
+        if !config.mcp_servers.is_empty() {
+            let materialize = config.materialize.as_ref().ok_or_else(|| {
+                "[[mcp_servers]] requires a [materialize] table for invocation results".to_owned()
+            })?;
+            let dir = config.absolute(&materialize.dir);
+            let mut servers = Vec::with_capacity(config.mcp_servers.len());
+            for server in &config.mcp_servers {
+                let bearer_token = match &server.bearer_token_env {
+                    Some(name) => match std::env::var(name) {
+                        Ok(value) if !value.trim().is_empty() => Some(value),
+                        _ => {
+                            return Err(format!(
+                                "mcp_servers.bearer_token_env {name} is not set or empty"
+                            ))
+                        }
+                    },
+                    None => None,
+                };
+                servers.push(McpServer {
+                    id: server.id.clone(),
+                    endpoint: server.endpoint.clone(),
+                    timeout_ms: server.timeout_ms,
+                    bearer_token,
+                });
+            }
+            let adapter = McpAdapter::new(servers, &dir, materialize.max_bytes)
+                .map_err(|error| format!("mcp adapter: {error}"))?;
+            invokers.register(Box::new(adapter));
+        }
+
+        // 只读能力必须指向已登记的服务端并有物化目录，否则调用阶段无法闭环。
+        for ((domain, type_name), profile) in &profiles {
+            let Some(capability) = &profile.card.spec.capability else {
+                continue;
+            };
+            if capability.side_effect != SideEffect::ReadOnly {
+                continue;
+            }
+            if config.mcp_server(&capability.server.id).is_none() {
+                return Err(format!(
+                    "profile {domain}/{type_name} read-only capability requires \
+                     mcp_servers.id = {}",
+                    capability.server.id
+                ));
+            }
+            if config.materialize.is_none() {
+                return Err(format!(
+                    "profile {domain}/{type_name} read-only capability requires [materialize]"
+                ));
+            }
+        }
+
         Ok(Self {
             authenticator,
             acl,
             audit,
             audit_fail_open: config.audit.fail_open,
             resolvers: Arc::new(resolvers),
+            invokers: Arc::new(invokers),
             profiles,
         })
     }

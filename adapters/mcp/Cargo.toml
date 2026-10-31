@@ -3,7 +3,10 @@ name = "pact-ref-adapter-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MCP capability adapter skeleton"
+description = "MCP 动态只读 adapter：tools/call 与结果物化"
 
 [dependencies]
 pact-ref-core.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true

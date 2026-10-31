@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use pact_ref_auth::Identity;
 use pact_ref_core::{
-    AuditEvent, ReferenceError, ReferenceForm, Resolution, ResolveIntent, ResolveRequest,
+    AuditEvent, Invocation, InvocationStatus, InvokeRequest, ReferenceError, ReferenceForm,
+    Resolution, ResolveIntent, ResolveRequest, SideEffect,
 };
+use pact_ref_invoker::InvokerRegistry;
 use pact_ref_resolver::ResolverRegistry;
 
 use crate::config::validate_selector;
@@ -37,6 +39,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(readyz))
         .route("/v1/resolve", any(resolve))
         .route("/v1/describe", any(describe))
+        .route("/v1/invoke", any(invoke))
         .with_state(state)
 }
 
@@ -60,10 +63,15 @@ async fn describe(State(state): State<Arc<AppState>>, request: Request) -> Respo
     business(state, request, Operation::Describe).await
 }
 
+async fn invoke(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    business(state, request, Operation::Invoke).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Resolve,
     Describe,
+    Invoke,
 }
 
 impl Operation {
@@ -71,6 +79,7 @@ impl Operation {
         match self {
             Self::Resolve => pact_ref_auth::SCOPE_RESOLVE,
             Self::Describe => pact_ref_auth::SCOPE_DESCRIBE,
+            Self::Invoke => pact_ref_auth::SCOPE_INVOKE,
         }
     }
 
@@ -78,6 +87,7 @@ impl Operation {
         match self {
             Self::Resolve => "resolve",
             Self::Describe => "describe",
+            Self::Invoke => "invoke",
         }
     }
 }
@@ -185,6 +195,7 @@ async fn run_business(
     match operation {
         Operation::Resolve => handle_resolve(state, identity, &bytes, context).await,
         Operation::Describe => handle_describe(state, identity, &bytes, context),
+        Operation::Invoke => handle_invoke(state, identity, &bytes, context).await,
     }
 }
 
@@ -337,6 +348,108 @@ fn handle_describe(
         &context.trace_id,
         &profile.descriptor,
     ))
+}
+
+async fn handle_invoke(
+    state: &AppState,
+    identity: &Identity,
+    bytes: &[u8],
+    context: &mut AuditContext,
+) -> Result<Response, ApiError> {
+    let wire: InvokeWire = parse_json(bytes)?;
+    validate_selector("domain", &wire.domain).map_err(|_| invalid_selector("domain"))?;
+    validate_selector("type", &wire.type_name).map_err(|_| invalid_selector("type"))?;
+    validate_selector("operation", &wire.operation).map_err(|_| invalid_selector("operation"))?;
+    validate_idempotency_key(&wire.idempotency_key)?;
+    let reference = parse_reference(&wire.reference)?;
+
+    context.reference = Some(wire.reference.clone());
+    context.domain = Some(wire.domain.clone());
+    context.type_name = Some(wire.type_name.clone());
+    context.operation = "invoke".to_owned();
+
+    let scheme = reference.scheme().unwrap_or_default();
+    if !state.acl.allows(
+        &identity.subject,
+        &wire.domain,
+        &wire.type_name,
+        scheme,
+        "invoke",
+    ) {
+        return Err(ApiError::forbidden("object ACL denied"));
+    }
+
+    let profile = state
+        .profile(&wire.domain, &wire.type_name)
+        .ok_or_else(ApiError::not_found)?;
+    if !profile.schemes.iter().any(|allowed| allowed == scheme) {
+        return Err(ApiError::invalid_reference(
+            "scheme is not allowed by the contract",
+        ));
+    }
+    let capability = profile
+        .card
+        .spec
+        .capability
+        .as_ref()
+        .ok_or_else(|| ApiError::invalid_reference("profile is not a capability"))?;
+    if capability.side_effect != SideEffect::ReadOnly {
+        return Err(ApiError::forbidden(
+            "only read-only capabilities can be invoked",
+        ));
+    }
+    if !reference_belongs_to(&wire.reference, &capability.server.id) {
+        return Err(ApiError::invalid_reference(
+            "reference must point at the capability server",
+        ));
+    }
+
+    context.contract_id = Some(profile.descriptor.contract_id.clone());
+
+    let request = InvokeRequest {
+        domain: wire.domain,
+        type_name: wire.type_name,
+        reference,
+        actor: identity.subject.clone(),
+        operation: wire.operation,
+        idempotency_key: wire.idempotency_key,
+        input: wire.input,
+    };
+    let invocation = call_invoker(&state.invokers, request).await?;
+    if invocation.status != InvocationStatus::Succeeded {
+        // 上游明确失败：审计记录业务失败，响应仍走统一错误信封。
+        context.status_override = Some("failed".to_owned());
+        return Err(ApiError::upstream_failure("capability invocation failed"));
+    }
+    context.result_digest = invocation.result_digest.clone();
+
+    let body = InvokeBody {
+        status: "succeeded",
+        result_ref: invocation.result_ref,
+        result_digest: invocation.result_digest,
+    };
+    Ok(json_response(StatusCode::OK, &context.trace_id, &body))
+}
+
+/// 引用必须落在卡片声明的服务标识之下，且带非空工具路径。
+fn reference_belongs_to(reference: &str, server_id: &str) -> bool {
+    reference
+        .strip_prefix(server_id)
+        .is_some_and(|tail| tail.starts_with('/') && !tail.trim_matches('/').is_empty())
+}
+
+async fn call_invoker(
+    invokers: &Arc<InvokerRegistry>,
+    request: InvokeRequest,
+) -> Result<Invocation, ApiError> {
+    let invokers = Arc::clone(invokers);
+    let task = tokio::task::spawn_blocking(move || invokers.invoke(&request));
+    match tokio::time::timeout(REQUEST_TIMEOUT, task).await {
+        Err(_) => Err(ApiError::upstream_timeout()),
+        Ok(Err(_)) => Err(ApiError::internal("invoker task failed")),
+        Ok(Ok(Ok(invocation))) => Ok(invocation),
+        Ok(Ok(Err(error))) => Err(map_reference_error(error)),
+    }
 }
 
 async fn call_adapter(
@@ -532,6 +645,16 @@ struct ResolutionBody {
     handle: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InvokeBody {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_digest: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // 请求校验
 // ---------------------------------------------------------------------------
@@ -559,6 +682,19 @@ struct DescribeWire {
     reference: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InvokeWire {
+    domain: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    reference: String,
+    operation: String,
+    idempotency_key: String,
+    #[serde(default)]
+    input: serde_json::Value,
+}
+
 fn parse_reference(raw: &str) -> Result<ReferenceForm, ApiError> {
     match ReferenceForm::classify(Some(raw)) {
         Ok(form) if form.is_uri() => Ok(form),
@@ -584,6 +720,21 @@ fn validate_expected_digest(value: &str) -> Result<(), ApiError> {
         Err(ApiError::invalid_request(
             "expectedDigest must be sha256:<64 lowercase hex>",
         ))
+    }
+}
+
+fn validate_idempotency_key(value: &str) -> Result<(), ApiError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        Err(ApiError::invalid_request(
+            "idempotencyKey must match [A-Za-z0-9._:-]{1,128}",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -725,11 +876,12 @@ impl ApiError {
     }
 }
 
-/// `domain` / `type` 校验失败统一为固定消息，不回显请求内容。
+/// `domain` / `type` / `operation` 校验失败统一为固定消息，不回显请求内容。
 fn invalid_selector(label: &str) -> ApiError {
     let message = match label {
         "domain" => "domain must be 1..=255 characters without control characters",
-        _ => "type must be 1..=255 characters without control characters",
+        "type" => "type must be 1..=255 characters without control characters",
+        _ => "operation must be 1..=255 characters without control characters",
     };
     ApiError::invalid_request(message)
 }
@@ -744,6 +896,8 @@ struct AuditContext {
     operation: String,
     token_id: Option<String>,
     result_digest: Option<String>,
+    /// 业务层失败（如上游调用返回失败）时的审计状态覆盖。
+    status_override: Option<String>,
 }
 
 impl AuditContext {
@@ -758,10 +912,12 @@ impl AuditContext {
             operation: operation.to_owned(),
             token_id: None,
             result_digest: None,
+            status_override: None,
         }
     }
 
     fn event(&self, status: &str) -> AuditEvent {
+        let status = self.status_override.as_deref().unwrap_or(status);
         AuditEvent {
             trace_id: self.trace_id.clone(),
             token_id: self.token_id.clone(),

@@ -1,5 +1,7 @@
 //! `refd` 端点契约集成测试：传输约束、认证/scope/ACL、resolve/describe 与审计闭环。
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -743,4 +745,398 @@ async fn audit_failure_is_allowed_only_with_explicit_fail_open() {
     assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["contractId"], "build/artifact");
+}
+
+// ---------------------------------------------------------------------------
+// 动态只读调用（FR36 / D52）：mcp-read → invoke → 物化 → resolve 闭环
+// ---------------------------------------------------------------------------
+
+const MCP_OK_RESPONSE: &str =
+    r#"{"jsonrpc":"2.0","id":"idem-1","result":{"content":[{"type":"text","text":"42"}]}}"#;
+const MCP_ERROR_RESPONSE: &str =
+    r#"{"jsonrpc":"2.0","id":"idem-1","error":{"code":-32000,"message":"upstream exploded"}}"#;
+
+fn mcp_card(server_id: &str, side_effect: &str) -> String {
+    format!(
+        r#"
+apiVersion: pact.ref/v1
+kind: ContractCard
+metadata:
+  id: query/answer
+  version: "1"
+  owner: query-platform
+  status: active
+spec:
+  capability:
+    kind: mcp-tool
+    server:
+      id: {server_id}
+    tool:
+      name: query.run
+      inputSchemaDigest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    sideEffect: {side_effect}
+    idempotency:
+      key: request-id
+      semantics: at-most-once
+    result:
+      materialization: required
+    auth:
+      audience: pact-ref
+      scopes: ["query:read"]
+    timeoutMs: 5000
+  reference:
+    schemes: ["mcp", "file"]
+    mutableAllowed: false
+"#
+    )
+}
+
+/// 构造一份指向只读能力卡片的配置；`mcp` / `materialize` 用于制造启动失败场景。
+fn mcp_config(server_id: &str, endpoint: &str, mcp: bool, materialize: bool) -> String {
+    let mcp_section = if mcp {
+        format!(
+            r#"
+[[mcp_servers]]
+id = "{server_id}"
+endpoint = "{endpoint}"
+allow_plaintext = true
+timeout_ms = 5000
+"#
+        )
+    } else {
+        String::new()
+    };
+    let materialize_section = if materialize {
+        "[materialize]\ndir = \"materialized\"\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+[server]
+bind = "127.0.0.1:8080"
+allow_plaintext = true
+
+[auth]
+mode = "static"
+
+[auth.static]
+allow = true
+token = "s3cret"
+subject = "alice"
+scopes = ["ref:invoke", "ref:resolve"]
+
+[audit]
+path = "audit.jsonl"
+
+[adapter.file]
+root = "."
+
+[[acl]]
+principal = "alice"
+domains = ["query"]
+types = ["answer"]
+schemes = ["mcp", "file"]
+operations = ["invoke", "resolve:read"]
+
+[[profiles]]
+domain = "query"
+type = "answer"
+card = "card.yaml"
+
+{mcp_section}
+{materialize_section}
+"#
+    )
+}
+
+/// 假 MCP 服务端：接受一次连接，读完 `Content-Length` 指定的请求体后回固定 JSON-RPC 响应。
+fn fake_mcp_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake mcp");
+    let address = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let request = read_http_request(&mut stream);
+        assert!(request.contains("\"tools/call\""), "unexpected request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).expect("write");
+        let _ = stream.flush();
+    });
+    (format!("http://{address}"), handle)
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).expect("read request");
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..read]);
+        let text = String::from_utf8_lossy(&data).to_string();
+        if let Some(header_end) = text.find("\r\n\r\n") {
+            let length = text[..header_end]
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            if data.len() >= header_end + 4 + length {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&data).to_string()
+}
+
+struct McpFixture {
+    dir: PathBuf,
+    reference: String,
+    state: Arc<AppState>,
+    _server: std::thread::JoinHandle<()>,
+}
+
+impl McpFixture {
+    fn new(operations: &[&str], side_effect: &str, response: &'static str) -> Self {
+        let (endpoint, server) = fake_mcp_server(response);
+        let address = endpoint
+            .strip_prefix("http://")
+            .expect("http endpoint")
+            .to_owned();
+        let server_id = format!("mcp://{address}");
+
+        let unique = format!(
+            "refd-mcp-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(dir.join("materialized")).expect("materialize dir");
+        std::fs::write(dir.join("card.yaml"), mcp_card(&server_id, side_effect)).expect("card");
+
+        let mut config = mcp_config(&server_id, &endpoint, true, true);
+        config = config.replace(
+            r#"operations = ["invoke", "resolve:read"]"#,
+            &format!("operations = [{}]", quoted(operations)),
+        );
+        let config = Config::from_toml(&config, &dir).expect("config");
+        let state = AppState::from_config(config).expect("state");
+        Self {
+            dir,
+            reference: format!("{server_id}/query.run"),
+            state: Arc::new(state),
+            _server: server,
+        }
+    }
+
+    fn router(&self) -> Router {
+        router(Arc::clone(&self.state))
+    }
+
+    fn invoke_body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "domain": "query",
+            "type": "answer",
+            "reference": self.reference,
+            "operation": "query.run",
+            "idempotencyKey": "idem-1",
+            "input": { "q": "life" },
+        })
+    }
+
+    fn audit_events(&self) -> Vec<serde_json::Value> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("audit.jsonl")) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("audit json"))
+            .collect()
+    }
+}
+
+impl Drop for McpFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test]
+async fn invoke_materializes_result_and_resolves_it() {
+    let fixture = McpFixture::new(&["invoke", "resolve:read"], "read-only", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/invoke", fixture.invoke_body())).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "succeeded");
+    let result_ref = json["resultRef"].as_str().expect("resultRef").to_owned();
+    let result_digest = json["resultDigest"]
+        .as_str()
+        .expect("resultDigest")
+        .to_owned();
+    assert!(result_ref.starts_with("file://"));
+    assert!(result_digest.starts_with("sha256:"));
+
+    // 物化结果可再次经静态 resolve 取回，形成闭环。
+    let path = result_ref.strip_prefix("file://").expect("file uri");
+    let materialized = std::fs::read_to_string(path).expect("materialized result");
+    assert!(materialized.contains("\"text\":\"42\""));
+
+    let (status, _, body) = send(
+        fixture.router(),
+        post(
+            "/v1/resolve",
+            serde_json::json!({
+                "domain": "query",
+                "type": "answer",
+                "reference": result_ref,
+                "intent": "read",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["digest"], result_digest);
+    assert_eq!(json["contractId"], "query/answer");
+    assert_eq!(json["version"], "1");
+
+    let events = fixture.audit_events();
+    let invoke = events
+        .iter()
+        .find(|event| event["operation"] == "invoke")
+        .expect("invoke audit event");
+    assert_eq!(invoke["status"], "ok");
+    assert_eq!(invoke["resultDigest"], result_digest);
+}
+
+#[tokio::test]
+async fn invoke_rejects_mutating_capability() {
+    let fixture = McpFixture::new(&["invoke"], "mutating", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/invoke", fixture.invoke_body())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "Forbidden");
+}
+
+#[tokio::test]
+async fn invoke_requires_object_acl_operation() {
+    let fixture = McpFixture::new(&["resolve:read"], "read-only", MCP_OK_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/invoke", fixture.invoke_body())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "Forbidden");
+}
+
+#[tokio::test]
+async fn upstream_failure_is_bad_gateway_and_audited_as_failed() {
+    let fixture = McpFixture::new(&["invoke"], "read-only", MCP_ERROR_RESPONSE);
+    let (status, _, body) = send(fixture.router(), post("/v1/invoke", fixture.invoke_body())).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "UpstreamFailure");
+
+    let events = fixture.audit_events();
+    let invoke = events
+        .iter()
+        .find(|event| event["operation"] == "invoke")
+        .expect("invoke audit event");
+    assert_eq!(invoke["status"], "failed");
+    assert!(invoke["resultDigest"].is_null());
+}
+
+#[test]
+fn read_only_profile_requires_registered_mcp_server() {
+    let (endpoint, server) = fake_mcp_server(MCP_OK_RESPONSE);
+    let address = endpoint.strip_prefix("http://").expect("http");
+    let server_id = format!("mcp://{address}");
+    let dir = std::env::temp_dir().join(format!(
+        "refd-mcp-missing-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join("materialized")).expect("dir");
+    std::fs::write(dir.join("card.yaml"), mcp_card(&server_id, "read-only")).expect("card");
+
+    let config = mcp_config(&server_id, &endpoint, false, true);
+    let config = Config::from_toml(&config, &dir).expect("config");
+    let error = match AppState::from_config(config) {
+        Ok(_) => panic!("state must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("mcp_servers.id"),
+        "unexpected error: {error}"
+    );
+
+    let _ = server;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_only_profile_requires_materialize() {
+    let (endpoint, server) = fake_mcp_server(MCP_OK_RESPONSE);
+    let address = endpoint.strip_prefix("http://").expect("http");
+    let server_id = format!("mcp://{address}");
+    let dir = std::env::temp_dir().join(format!(
+        "refd-mcp-nomaterialize-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join("materialized")).expect("dir");
+    std::fs::write(dir.join("card.yaml"), mcp_card(&server_id, "read-only")).expect("card");
+
+    let config = mcp_config(&server_id, &endpoint, true, false);
+    let config = Config::from_toml(&config, &dir).expect("config");
+    let error = match AppState::from_config(config) {
+        Ok(_) => panic!("state must fail closed"),
+        Err(error) => error,
+    };
+    assert!(error.contains("[materialize]"), "unexpected error: {error}");
+
+    let _ = server;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mcp_endpoint_plaintext_requires_explicit_loopback() {
+    let dir = std::env::temp_dir().join(format!(
+        "refd-mcp-endpoint-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join("materialized")).expect("dir");
+
+    let public = mcp_config(
+        "mcp://upstream.example",
+        "http://upstream.example",
+        true,
+        true,
+    );
+    let config = Config::from_toml(&public, &dir).expect("config");
+    let error = config
+        .validate()
+        .expect_err("non-loopback http must be rejected");
+    assert!(error.contains("loopback"), "unexpected error: {error}");
+
+    let tls = mcp_config(
+        "mcp://upstream.example",
+        "https://upstream.example",
+        true,
+        true,
+    );
+    let config = Config::from_toml(&tls, &dir).expect("config");
+    config.validate().expect("https endpoint is allowed");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -7,3 +7,6 @@ description = "PACT 物引治理参与者 SDK 门面"
 
 [dependencies]
 pact-ref-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

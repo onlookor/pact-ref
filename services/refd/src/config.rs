@@ -32,6 +32,12 @@ pub struct Config {
     pub acl: Vec<AclRuleConfig>,
     #[serde(default)]
     pub profiles: Vec<ProfileConfig>,
+    /// 动态只读调用结果的物化目录（FR36）。存在只读能力时必需。
+    #[serde(default)]
+    pub materialize: Option<MaterializeConfig>,
+    /// 已登记的 MCP 服务端（D52）；未登记的 `mcp://` 引用拒绝调用。
+    #[serde(default, rename = "mcp_servers")]
+    pub mcp_servers: Vec<McpServerConfig>,
     /// 配置文件所在目录；相对路径以此为基准。不参与反序列化。
     #[serde(skip)]
     pub base_dir: PathBuf,
@@ -212,6 +218,47 @@ pub struct ProfileConfig {
     pub card: PathBuf,
 }
 
+/// 调用结果物化配置（FR36）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializeConfig {
+    /// 已存在的目录；产物为 `<sha256>.json`。
+    pub dir: PathBuf,
+    #[serde(default = "default_materialize_max_bytes")]
+    pub max_bytes: usize,
+}
+
+fn default_materialize_max_bytes() -> usize {
+    1024 * 1024
+}
+
+/// 已登记的 MCP 服务端（D52）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerConfig {
+    /// 与卡片 `capability.server.id` 相同的 `mcp://` 服务标识。
+    pub id: String,
+    /// 上游调用地址；默认必须是 `https://`。
+    pub endpoint: String,
+    /// 仅当端点主机为回环地址时允许明文 `http://`（本地开发/测试）。
+    #[serde(default)]
+    pub allow_plaintext: bool,
+    #[serde(default = "default_mcp_timeout_ms")]
+    pub timeout_ms: u64,
+    /// 上游 bearer 令牌所在环境变量名；缺省则不发送凭据。
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+}
+
+fn default_mcp_timeout_ms() -> u64 {
+    10_000
+}
+
+/// 单次物化结果上限 16 MiB，避免上游响应把内存打满。
+pub const MAX_MATERIALIZE_BYTES: usize = 16 * 1024 * 1024;
+/// 单次上游调用超时上限 30s，与 `refd` 单请求上限一致。
+pub const MAX_MCP_TIMEOUT_MS: u64 = 30_000;
+
 impl Config {
     /// 从文件加载；相对路径以配置文件目录为基准。
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -363,7 +410,51 @@ impl Config {
                 ));
             }
         }
+
+        if let Some(materialize) = &self.materialize {
+            if materialize.max_bytes == 0 {
+                return Err("materialize.max_bytes must be > 0".to_owned());
+            }
+            if materialize.max_bytes > MAX_MATERIALIZE_BYTES {
+                return Err(format!(
+                    "materialize.max_bytes must be <= {MAX_MATERIALIZE_BYTES}"
+                ));
+            }
+            let dir = self.absolute(&materialize.dir);
+            let metadata = std::fs::metadata(&dir)
+                .map_err(|error| format!("read materialize.dir {}: {error}", dir.display()))?;
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "materialize.dir is not a directory: {}",
+                    dir.display()
+                ));
+            }
+        }
+
+        let mut seen_servers = HashMap::new();
+        for server in &self.mcp_servers {
+            validate_mcp_server_id(&server.id)?;
+            validate_mcp_endpoint(&server.endpoint, server.allow_plaintext)?;
+            if server.timeout_ms == 0 || server.timeout_ms > MAX_MCP_TIMEOUT_MS {
+                return Err(format!(
+                    "mcp_servers.timeout_ms must be in 1..={MAX_MCP_TIMEOUT_MS}"
+                ));
+            }
+            if let Some(env) = &server.bearer_token_env {
+                if env.trim().is_empty() {
+                    return Err("mcp_servers.bearer_token_env must not be empty".to_owned());
+                }
+            }
+            if seen_servers.insert(server.id.as_str(), ()).is_some() {
+                return Err(format!("duplicate mcp_servers.id: {}", server.id));
+            }
+        }
         Ok(())
+    }
+
+    /// 按服务标识查找已登记的 MCP 服务端。
+    pub fn mcp_server(&self, id: &str) -> Option<&McpServerConfig> {
+        self.mcp_servers.iter().find(|server| server.id == id)
     }
 
     /// 加载全部 profile 卡片并校验。
@@ -419,6 +510,61 @@ fn validate_https_endpoint(label: &str, value: &str) -> Result<(), String> {
     }
     if value.contains('#') {
         return Err(format!("{label} must not contain a fragment"));
+    }
+    Ok(())
+}
+
+/// MCP 调用端点：默认只接受 `https://`；显式 `allow_plaintext` 且主机为回环时才允许 `http://`。
+fn validate_mcp_endpoint(value: &str, allow_plaintext: bool) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("mcp_servers.endpoint must be a non-empty URL".to_owned());
+    }
+    if value.contains(['?', '#']) {
+        return Err("mcp_servers.endpoint must not contain a query or fragment".to_owned());
+    }
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return Err("mcp_servers.endpoint must use https://".to_owned());
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return Err("mcp_servers.endpoint must not contain userinfo".to_owned());
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
+    if scheme.eq_ignore_ascii_case("http") && allow_plaintext && is_loopback_authority(authority) {
+        return Ok(());
+    }
+    Err(
+        "mcp_servers.endpoint must use https://; http:// requires allow_plaintext and a loopback host"
+            .to_owned(),
+    )
+}
+
+/// 判断 authority 的主机部分是否为回环地址（支持 `[::1]:port`）。
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map(|(host, _)| host).unwrap_or(rest),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// MCP 服务标识：`mcp://<authority>[/<path>]`，不得带 userinfo、query、fragment。
+fn validate_mcp_server_id(value: &str) -> Result<(), String> {
+    let Some(rest) = value.strip_prefix("mcp://") else {
+        return Err("mcp_servers.id must be an mcp:// URI".to_owned());
+    };
+    if rest.is_empty()
+        || value.ends_with('/')
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+        || rest.contains(['@', '?', '#'])
+    {
+        return Err(format!("mcp_servers.id is not a valid mcp:// URI: {value}"));
     }
     Ok(())
 }

@@ -629,6 +629,9 @@ name = "pact-ref-adapter-mcp"
 version = "0.1.0"
 dependencies = [
  "pact-ref-core",
+ "serde_json",
+ "sha2",
+ "ureq",
 ]
 
 [[package]]
@@ -662,6 +665,7 @@ name = "pact-ref-client"
 version = "0.1.0"
 dependencies = [
  "pact-ref-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -686,6 +690,7 @@ name = "pact-ref-invoker"
 version = "0.1.0"
 dependencies = [
  "pact-ref-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -720,9 +725,11 @@ dependencies = [
  "jsonwebtoken",
  "pact-ref-adapter-file",
  "pact-ref-adapter-http",
+ "pact-ref-adapter-mcp",
  "pact-ref-audit",
  "pact-ref-auth",
  "pact-ref-core",
+ "pact-ref-invoker",
  "pact-ref-resolver",
  "ring",
  "serde",

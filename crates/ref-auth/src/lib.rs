@@ -10,6 +10,7 @@ use pact_ref_core::{Authorizer, ReferenceError, ReferenceForm, ResolveIntent};
 /// 端点 scope。
 pub const SCOPE_RESOLVE: &str = "ref:resolve";
 pub const SCOPE_DESCRIBE: &str = "ref:describe";
+pub const SCOPE_INVOKE: &str = "ref:invoke";
 
 /// 已认证主体。
 #[derive(Debug, Clone, PartialEq, Eq)]

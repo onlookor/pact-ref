@@ -7,3 +7,6 @@ description = "PACT 物引 invoke SPI 与动态能力注册表"
 
 [dependencies]
 pact-ref-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

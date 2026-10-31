@@ -92,6 +92,7 @@ mod tests {
             actor: "alice".to_owned(),
             operation: "build".to_owned(),
             idempotency_key: "idem-1".to_owned(),
+            input: serde_json::Value::Null,
         }
     }
 

@@ -9,8 +9,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 pub use pact_ref_spec::{
-    BindingMatch, ContractCard, MatchScope, RefBindings, RefRule, ReferenceForm, SpecError,
-    API_VERSION,
+    BindingMatch, ContractCard, MatchScope, Materialization, RefBindings, RefRule, ReferenceForm,
+    SideEffect, SpecError, API_VERSION,
 };
 
 /// 把规范层的引用分类错误映射为治理层错误。
@@ -115,7 +115,7 @@ pub struct Resolution {
     pub handle: Option<String>,
 }
 
-/// 调用请求。动态能力必须显式带幂等键。
+/// 调用请求。动态能力必须显式带幂等键；`input` 是工具参数，原样交给上游。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvokeRequest {
     pub domain: String,
@@ -124,6 +124,7 @@ pub struct InvokeRequest {
     pub actor: String,
     pub operation: String,
     pub idempotency_key: String,
+    pub input: serde_json::Value,
 }
 
 /// 调用状态。

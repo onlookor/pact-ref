@@ -493,6 +493,47 @@ fn validate_capability(
             ));
         }
     }
+    if capability.side_effect == SideEffect::ReadOnly {
+        // FR36 / 治理 §5.2 `mcp-read` 字段集：只读调用同样必须可幂等重放、可物化、
+        // 有明确 audience，并至少声明一个 schema 摘要。
+        let idempotency = capability.idempotency.as_ref().ok_or_else(|| {
+            SpecError::InvalidContract(
+                "read-only capability requires spec.capability.idempotency".to_owned(),
+            )
+        })?;
+        if idempotency.key.trim().is_empty() || idempotency.semantics.trim().is_empty() {
+            return Err(SpecError::InvalidContract(
+                "idempotency.key and idempotency.semantics must not be empty".to_owned(),
+            ));
+        }
+        let result = capability.result.as_ref().ok_or_else(|| {
+            SpecError::InvalidContract(
+                "read-only capability requires spec.capability.result".to_owned(),
+            )
+        })?;
+        if result.materialization != Materialization::Required {
+            return Err(SpecError::InvalidContract(
+                "read-only capability requires result.materialization=required".to_owned(),
+            ));
+        }
+        let audience = capability
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.audience.as_deref())
+            .unwrap_or_default();
+        if audience.trim().is_empty() {
+            return Err(SpecError::InvalidContract(
+                "read-only capability requires auth.audience".to_owned(),
+            ));
+        }
+        if capability.tool.input_schema_digest.is_none()
+            && capability.tool.output_schema_digest.is_none()
+        {
+            return Err(SpecError::InvalidContract(
+                "read-only capability requires at least one tool schema digest".to_owned(),
+            ));
+        }
+    }
     if let Some(auth) = &capability.auth {
         validate_auth(auth)?;
     }
@@ -726,6 +767,82 @@ mod tests {
             .idempotency = None;
         let error = card.validate().expect_err("reject");
         assert!(matches!(error, SpecError::InvalidContract(_)));
+    }
+
+    fn read_only_card() -> ContractCard {
+        let mut card: ContractCard = serde_json::from_str(MCP_CARD).expect("card");
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .side_effect = SideEffect::ReadOnly;
+        card
+    }
+
+    #[test]
+    fn validates_read_only_card() {
+        let card = read_only_card();
+        card.validate().expect("valid read-only card");
+    }
+
+    #[test]
+    fn rejects_read_only_without_materialization() {
+        let mut card = read_only_card();
+        card.spec.capability.as_mut().expect("capability").result = None;
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_read_only_without_idempotency() {
+        let mut card = read_only_card();
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .idempotency = None;
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_read_only_without_audience() {
+        let mut card = read_only_card();
+        card.spec.capability.as_mut().expect("capability").auth = Some(super::Auth {
+            scheme: None,
+            audience: None,
+            scopes: Vec::new(),
+            credential_source: None,
+        });
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_read_only_without_schema_digest() {
+        let mut card = read_only_card();
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .tool
+            .input_schema_digest = None;
+        card.spec
+            .capability
+            .as_mut()
+            .expect("capability")
+            .tool
+            .output_schema_digest = None;
+        assert!(matches!(
+            card.validate().expect_err("reject"),
+            SpecError::InvalidContract(_)
+        ));
     }
 
     #[test]
