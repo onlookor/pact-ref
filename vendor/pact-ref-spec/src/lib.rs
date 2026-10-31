@@ -8,6 +8,7 @@
 
 mod bindings;
 mod contract;
+mod entry;
 mod error;
 mod reference;
 mod tombstone;
@@ -22,6 +23,7 @@ pub use contract::{
     Materialization, Parties, Pinning, ReferenceContract, Resolution, ResolutionMode,
     ResultContract, SideEffect, Verification,
 };
+pub use entry::{validate_entry, EntryError, EntryRef};
 pub use error::SpecError;
 pub use reference::{
     classify_identifier, classify_reference, pinned_digest, PinningRequirement, ReferenceForm,
